@@ -17,7 +17,7 @@ class ProductQuantizer:
         self.codebooks: List[np.ndarray] = [] # List of codebooks for each subvector , len=num_subvectors
         self.seed = seed
 
-    def fit(self, vectors: np.ndarray, batch_size: int = 100_000) -> None:
+    def fit(self, vectors: np.ndarray, batch_size: int) -> None:
         """
         Train PQ codebooks on database vectors using MiniBatchKMeans with streaming (partial_fit).
         to works for huge datasets under strict RAM limits.
@@ -64,7 +64,7 @@ class ProductQuantizer:
             self.codebooks.append(kmeans.cluster_centers_.astype(np.float32))
 
 
-    def encode(self, vectors: np.ndarray, batch_size: int = 100_000) -> np.ndarray:
+    def encode(self, vectors: np.ndarray, batch_size: int) -> np.ndarray:
         """
         compress database vectors into PQ codes using the trained codebooks.
         
