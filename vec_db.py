@@ -2,23 +2,27 @@ from typing import Dict, List, Annotated
 import numpy as np
 import os
 
-from PQ import ProductQuantizer
+from PQ import ProductQuantizer, adc_distance
 from OPQPreprocessor import OPQPreprocessor
+from IVF import InvertedFileIndex
 
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 64
 
 class VecDB:
-    def __init__(self, database_file_path = "saved_db.dat", index_file_path = "index.dat", new_db = True, db_size = None,M=8, Ks=256, batch_size=131_072) -> None:
+    def __init__(self, database_file_path = "saved_db.dat", index_file_path = "index.dat", new_db = True, db_size = None, M=8, Ks=256, num_clusters=100, nprobe=10, batch_size=131_072) -> None:
         self.db_path = database_file_path
         self.index_path = index_file_path
         self.M = M
         self.Ks = Ks
+        self.num_clusters = num_clusters  
+        self.nprobe = nprobe              
         self.batch_size = batch_size
 
         self.pq: ProductQuantizer = None       # PQ object
         self.opq: OPQPreprocessor = None       # OPQ object
+        self.ivf: InvertedFileIndex = None     # IVF object
         self.pq_codes: np.memmap = None        # PQ codes stored on disk
         if new_db:
             if db_size is None:
@@ -68,16 +72,49 @@ class VecDB:
         return np.array(vectors)
     
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
-        scores = []
-        num_records = self._get_num_records()
-        # here we assume that the row number is the ID of each vector
-        for row_num in range(num_records):
-            vector = self.get_one_row(row_num)
-            score = self._cal_score(query, vector)
-            scores.append((score, row_num))
-        # here we assume that if two rows have the same score, return the lowest ID
-        scores = sorted(scores, reverse=True)[:top_k]
-        return [s[1] for s in scores]
+        """
+        Retrieve top_k most similar vectors using IVF-PQ.
+        
+        Search algorithm:
+        1. Rotate query using OPQ
+        2. Find nprobe nearest IVF clusters
+        3. Get candidate vector IDs from those clusters
+        4. Compute ADC distances to candidates using PQ codes
+        5. Return top_k nearest vectors
+        """
+        query = query.flatten()  # Ensure query is 1D
+        
+        # 1. Rotate query using OPQ
+        query_rotated = self.opq.transform(query.reshape(1, -1)).flatten()
+        
+        # 2. Find nprobe nearest clusters
+        cluster_ids = self.ivf.search_clusters(query_rotated, self.nprobe)
+        
+        # 3. Get candidate vector IDs from inverted lists
+        candidate_ids = self.ivf.get_candidate_ids(cluster_ids)
+        
+        if len(candidate_ids) == 0:
+            print("Warning: No candidates found in IVF search")
+            return []
+        
+        # 4. Get PQ codes for candidates
+        candidate_codes = self.pq_codes[candidate_ids]
+        
+        # 5. Compute ADC distances using PQ
+        distances = adc_distance(query_rotated, candidate_codes, self.pq)
+        
+        # 6. Get top_k nearest (smallest distances)
+        # Note: ADC returns squared distances, so smaller is better
+        if len(candidate_ids) < top_k:
+            top_k_indices = np.argsort(distances)
+        else:
+            top_k_indices = np.argpartition(distances, top_k)[:top_k]
+            top_k_indices = top_k_indices[np.argsort(distances[top_k_indices])]
+        
+        # Map back to original vector IDs
+        result_ids = [candidate_ids[i] for i in top_k_indices]
+        
+        return result_ids
     
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
@@ -89,54 +126,100 @@ class VecDB:
     def _build_index(self, apply_pca=False):
         OPQ_SAMPLE_SIZE = 32_768 
         PQ_SAMPLE_SIZE = 262_144
+        IVF_SAMPLE_SIZE = 262_144  # Sample for training IVF
         
         """
-        Build PQ index:
+        Build IVF-PQ index:
         1) Load vectors in batches 
-        2) Optional PCA rotation for better PQ accuracy
-        3) Train PQ codebooks
-        4) Encode all vectors into PQ codes
-        5) Store PQ codes as memmap on disk
+        2) Train OPQ rotation for better PQ accuracy
+        3) Train IVF (k-means clustering) on rotated vectors
+        4) Assign all vectors to IVF clusters
+        5) Train PQ codebooks on rotated vectors
+        6) Encode all vectors into PQ codes
+        7) Build inverted lists mapping clusters to vector IDs
+        8) Store everything to disk
         """
         num_records = self._get_num_records()
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION)) 
 
-        #TOOOOODOOOOOO: IMPLEMENT ROTATION
+        # Create models directory if it doesn't exist
+        os.makedirs("models", exist_ok=True)
+
+        # Sample indices for training
         rng = np.random.default_rng(DB_SEED_NUMBER)
-        pq_indices  = rng.choice(num_records, size=PQ_SAMPLE_SIZE, replace=False)
-        opq_indices = pq_indices[:OPQ_SAMPLE_SIZE]
+        ivf_indices = rng.choice(num_records, size=min(IVF_SAMPLE_SIZE, num_records), replace=False)
+        pq_indices  = rng.choice(num_records, size=min(PQ_SAMPLE_SIZE, num_records), replace=False)
+        opq_indices = pq_indices[:min(OPQ_SAMPLE_SIZE, len(pq_indices))]
 
         # Sort indices for faster disk seek
+        ivf_train_data = vectors[np.sort(ivf_indices)]
         pq_train_data  = vectors[np.sort(pq_indices)]
         opq_train_data = vectors[np.sort(opq_indices)]
             
-        print(" Training OPQ (Rotation)...")
-        self.opq = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)
+        # Step 1: Train OPQ (Rotation)
+        print("=" * 60)
+        print("STEP 1: Training OPQ (Rotation)...")
+        print("=" * 60)
+        self.opq = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, iterations=20)
         self.opq.fit(opq_train_data)
         self.opq.save("models/opq_model.pkl")
 
-        print(" Rotating PQ training sample...")
-        # We must rotate the PQ training data using the learned matrix so PQ learns codebooks on the *rotated* space.
-        pq_train_data = self.opq.transform(pq_train_data)
+        # Step 2: Train IVF on rotated vectors
+        print("\n" + "=" * 60)
+        print("STEP 2: Training IVF (Coarse Quantization)...")
+        print("=" * 60)
+        ivf_train_data_rotated = self.opq.transform(ivf_train_data)
+        self.ivf = InvertedFileIndex(num_clusters=self.num_clusters, seed=DB_SEED_NUMBER)
+        self.ivf.fit(ivf_train_data_rotated, batch_size=self.batch_size)
 
-        # Initialize PQ
-        self.pq = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)
-
-        # Fit PQ codebooks (batch processing inside PQ)
-        self.pq.fit(pq_train_data, batch_size=self.batch_size)
-
-        # Encode vectors into PQ codes
-        if os.path.exists(self.index_path):
-            os.remove(self.index_path) #Clean old index file if it exists
-        self.pq_codes = np.memmap(self.index_path, dtype=np.uint8, mode='w+', shape=(num_records, self.M))
-        
-        #Encode vectors into PQ codes in batches to save memory
+        # Step 3: Assign all vectors to IVF clusters
+        print("\n" + "=" * 60)
+        print("STEP 3: Assigning all vectors to IVF clusters...")
+        print("=" * 60)
+        all_vectors_rotated = np.zeros((num_records, DIMENSION), dtype=np.float32)
         for start in range(0, num_records, self.batch_size):
             end = min(start + self.batch_size, num_records)
-            batch_vectors = vectors[start:end]
-            batch_vectors = self.opq.transform(batch_vectors)
-            codes_batch = self.pq.encode(batch_vectors)
+            batch = vectors[start:end]
+            all_vectors_rotated[start:end] = self.opq.transform(batch)
+        
+        assignments = self.ivf.assign(all_vectors_rotated, batch_size=self.batch_size)
+        self.ivf.build_inverted_lists(assignments)
+        self.ivf.save("models/ivf_model.pkl")
+
+        # Step 4: Train PQ codebooks
+        print("\n" + "=" * 60)
+        print("STEP 4: Training PQ (Fine Quantization)...")
+        print("=" * 60)
+        pq_train_data_rotated = self.opq.transform(pq_train_data)
+        self.pq = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)
+        self.pq.fit(pq_train_data_rotated, batch_size=self.batch_size)
+
+        # Step 5: Encode all vectors into PQ codes
+        print("\n" + "=" * 60)
+        print("STEP 5: Encoding all vectors with PQ...")
+        print("=" * 60)
+        if os.path.exists(self.index_path):
+            os.remove(self.index_path)
+        self.pq_codes = np.memmap(self.index_path, dtype=np.uint8, mode='w+', shape=(num_records, self.M))
+        
+        for start in range(0, num_records, self.batch_size):
+            end = min(start + self.batch_size, num_records)
+            batch_rotated = all_vectors_rotated[start:end]
+            codes_batch = self.pq.encode(batch_rotated, batch_size=self.batch_size)
             self.pq_codes[start:end] = codes_batch
-        self.pq_codes.flush() #Ensure all memmap changes are written to disk.
+            
+            if (start // self.batch_size) % 10 == 0:
+                print(f"Encoded {end}/{num_records} vectors...")
+        
+        self.pq_codes.flush()
+        
+        print("\n" + "=" * 60)
+        print("IVF-PQ Index building complete!")
+        print("=" * 60)
+        print(f"IVF clusters: {self.num_clusters}")
+        print(f"PQ subvectors: {self.M}, centroids per subvector: {self.Ks}")
+        print(f"Total vectors indexed: {num_records}")
+        print(f"Compression ratio: {DIMENSION * 4 / self.M:.2f}x (from {DIMENSION * 4} bytes to {self.M} bytes)")
+        print("=" * 60)
 
 
