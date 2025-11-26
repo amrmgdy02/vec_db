@@ -155,17 +155,33 @@ class VecDB:
             self.ivf.fit(ivf_train_data, batch_size=self.batch_size)
             print("IVF training completed.")
             
+            ivf_centroids_metadata = dict(num_clusters=self.num_clusters, dimension=DIMENSION, seed=self.ivf.seed)
+            save_kwargs = {f"ivf_centroid{i}": centroid for i, centroid in enumerate(self.ivf.centroids)}
+            np.savez_compressed("indexes/ivf_centroids.npz", **ivf_centroids_metadata, **save_kwargs)
+            
             print("Assigning vectors to IVF clusters...")
             assignments = self.ivf.assign(vectors, batch_size=self.batch_size)
             self.ivf.build_inverted_lists(assignments)
             self.ivf.save("models/ivf_model.pkl")
             print("IVF assignment and inverted list building completed.")
             
+            # save the inverted lists to index file
+            inverted_lists_metadata = dict(num_clusters=self.num_clusters, num_records=num_records)
+            save_kwargs = {
+                "inverted_offsets": self.ivf.inverted_offsets,
+                "inverted_ids": self.ivf.inverted_ids
+            }
+            np.savez_compressed("indexes/inverted_lists.npz", **inverted_lists_metadata, **save_kwargs)
+            
             
             print(" Training OPQ (Rotation)...")
             self.opq = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)
             self.opq.fit(opq_train_data)
             self.opq.save("models/opq_model.pkl")
+            print(" OPQ training completed.")
+            # save the rotation matrix
+            np.savez_compressed("indexes/opq_rotation_matrix.npz", M=self.M, Ks=self.Ks, R=self.opq.R)
+            
 
             print(" Rotating PQ training sample...")
             # We must rotate the PQ training data using the learned matrix so PQ learns codebooks on the *rotated* space.
@@ -176,11 +192,21 @@ class VecDB:
 
             # Fit PQ codebooks (batch processing inside PQ)
             self.pq.fit(pq_train_data, batch_size=self.batch_size)
+            
+            # Save the codebooks
+            # codebooks: List[np.ndarray] (M, Ks, subdim) float32
+            codebooks_metadata = dict(M=self.M, Ks=self.Ks, dim=self.M * self.pq.codebooks[0].shape[1])
+            save_kwargs = {f"cb{i}": cb for i, cb in enumerate(self.pq.codebooks)}
+            np.savez_compressed("indexes/pq_codebooks.npz", **codebooks_metadata, **save_kwargs)
 
             # Encode vectors into PQ codes
             if os.path.exists(self.index_path):
                 os.remove(self.index_path) #Clean old index file if it exists
             self.pq_codes = np.memmap(self.index_path, dtype=np.uint8, mode='w+', shape=(num_records, self.M))
+            # save the pq_codes
+            pq_metadata = dict(num_records=num_records, M=self.M)
+            save_kwargs = {"pq_codes": self.pq_codes}
+            np.savez_compressed("indexes/pq_codes_metadata.npz", **pq_metadata, **save_kwargs)
             
             #Encode vectors into PQ codes in batches to save memory
             for start in range(0, num_records, self.batch_size):
