@@ -13,7 +13,8 @@ class InvertedFileIndex:
         self.num_clusters = num_clusters
         self.seed = seed
         self.centroids: np.ndarray = None  # Shape: (num_clusters, dimension)
-        self.inverted_lists: Dict[int, List[int]] = {}  # Maps cluster_id -> list of vector IDs
+        self.inverted_offsets: np.ndarray = None  # Shape: (num_clusters + 1,)
+        self.inverted_ids: np.ndarray = None  # Flat array of all vector IDs
         
     def fit(self, vectors: np.ndarray, batch_size: int) -> None:
         #train IVF using k-means
@@ -110,7 +111,8 @@ class InvertedFileIndex:
             'num_clusters': self.num_clusters,
             'seed': self.seed,
             'centroids': self.centroids,
-            'inverted_lists': self.inverted_lists
+            'inverted_offsets': self.inverted_offsets,
+            'inverted_ids': self.inverted_ids
         }
         with open(filepath, 'wb') as f:
             pickle.dump(state, f)
@@ -135,6 +137,7 @@ class InvertedFileIndex:
             seed=state['seed']
         )
         instance.centroids = state['centroids']
-        instance.inverted_lists = state['inverted_lists']
+        instance.inverted_offsets = state['inverted_offsets']
+        instance.inverted_ids = state['inverted_ids']
         print(f"IVF model loaded from {filepath}")
         return instance
