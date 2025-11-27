@@ -41,6 +41,9 @@ class InvertedFileIndex:
         """
         Assign vectors to their nearest cluster using matrix multiplication.
         """
+        if self.centroids is None:
+            raise ValueError("Centroids are not initialized. Call fit() before assign().")
+
         num_vectors = vectors.shape[0]
         assignments = np.memmap("assignments.dat", dtype=np.int32, mode='w+', shape=(num_vectors,))
         
@@ -50,6 +53,7 @@ class InvertedFileIndex:
         
         for start in range(0, num_vectors, batch_size):
             end = min(start + batch_size, num_vectors)
+            # slice from vectors (this will be a contiguous read if `vectors` is a memmap)
             batch = vectors[start:end].astype(np.float32)
             
             # 1. Compute Batch norms (Equation part: ||A||^2)
