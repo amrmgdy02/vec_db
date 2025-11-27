@@ -85,23 +85,23 @@ class VecDB:
         query = query.flatten()  # Ensure query is 1D
         
         # 1. Find nprobe nearest clusters
-        cluster_ids = self.ivf.search_clusters(query, self.nprobe)
+        cluster_ids = self.ivf.search_clusters(query, self.nprobe) # Needs to get centroids from index file
         
         # 2. Get candidate vector IDs from inverted lists
-        candidate_ids = self.ivf.get_candidate_ids(cluster_ids)
+        candidate_ids = self.ivf.get_candidate_ids(cluster_ids) # Needs to get inverted lists (ids and offsets) from index file
         
         if len(candidate_ids) == 0:
             print("Warning: No candidates found in IVF search")
             return []
         
         # 3. Get PQ codes for candidates
-        candidate_codes = self.pq_codes[candidate_ids]
+        candidate_codes = self.pq_codes[candidate_ids] # Needs to load pq_codes from disk (for each vector, List of size M)
         
         # 4. Rotate query using OPQ
-        query_rotated = self.opq.transform(query.reshape(1, -1)).flatten()
+        query_rotated = self.opq.transform(query.reshape(1, -1)).flatten()  # Needs to get R from index file
         
         # 5. Compute ADC distances using PQ
-        distances = adc_distance(query_rotated, candidate_codes, self.pq)
+        distances = adc_distance(query_rotated, candidate_codes, self.pq) # Needs to load Centroids (codebooks) from index file
         
         # 6. Get top_k nearest (smallest distances)
         # Note: ADC returns squared distances, so smaller is better
@@ -139,7 +139,6 @@ class VecDB:
             num_records = self._get_num_records()
             vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION)) 
 
-            #TOOOOODOOOOOO: IMPLEMENT ROTATION
             rng = np.random.default_rng(DB_SEED_NUMBER)
             ivf_indices = rng.choice(num_records, size=min(IVF_SAMPLE_SIZE, num_records), replace=False)
             pq_indices  = rng.choice(num_records, size=PQ_SAMPLE_SIZE, replace=False)
@@ -155,36 +154,29 @@ class VecDB:
             self.ivf.fit(ivf_train_data, batch_size=self.batch_size)
             print("IVF training completed.")
             
-            ivf_centroids_metadata = dict(num_clusters=self.num_clusters, dimension=DIMENSION, seed=self.ivf.seed)
-            save_kwargs = {f"ivf_centroid{i}": centroid for i, centroid in enumerate(self.ivf.centroids)}
-            np.savez_compressed("indexes/ivf_centroids.npz", **ivf_centroids_metadata, **save_kwargs)
+            # save the centroids as numpy file
+            centroids = self.ivf.centroids.astype(np.float32)
+            np.save("indexes/ivf_centroids.npy", centroids, allow_pickle=False)
             
             print("Assigning vectors to IVF clusters...")
             assignments = self.ivf.assign(vectors, batch_size=self.batch_size)
             self.ivf.build_inverted_lists(assignments)
-            self.ivf.save("models/ivf_model.pkl")
+            #self.ivf.save("models/ivf_model.pkl")
             print("IVF assignment and inverted list building completed.")
             
             # save the inverted lists to index file
-            inverted_lists_metadata = dict(num_clusters=self.num_clusters, num_records=num_records)
-            save_kwargs = {
-                "inverted_offsets": self.ivf.inverted_offsets,
-                "inverted_ids": self.ivf.inverted_ids
-            }
-            np.savez_compressed("indexes/inverted_lists.npz", **inverted_lists_metadata, **save_kwargs)
-            
+            np.save("indexes/inverted_ids.npy", self.ivf.inverted_ids.astype(np.int32)) # large
+            np.save("indexes/inverted_offsets.npy", self.ivf.inverted_offsets.astype(np.int32)) # small
             
             print(" Training OPQ (Rotation)...")
             self.opq = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)
             self.opq.fit(opq_train_data)
             self.opq.save("models/opq_model.pkl")
             print(" OPQ training completed.")
-            # save the rotation matrix
-            np.savez_compressed("indexes/opq_rotation_matrix.npz", M=self.M, Ks=self.Ks, R=self.opq.R)
             
+            # save the rotation matrix
+            np.save("indexes/opq_rotation.npy", self.opq.R)
 
-            print(" Rotating PQ training sample...")
-            # We must rotate the PQ training data using the learned matrix so PQ learns codebooks on the *rotated* space.
             pq_train_data = self.opq.transform(pq_train_data)
 
             # Initialize PQ
@@ -194,19 +186,12 @@ class VecDB:
             self.pq.fit(pq_train_data, batch_size=self.batch_size)
             
             # Save the codebooks
-            # codebooks: List[np.ndarray] (M, Ks, subdim) float32
-            codebooks_metadata = dict(M=self.M, Ks=self.Ks, dim=self.M * self.pq.codebooks[0].shape[1])
-            save_kwargs = {f"cb{i}": cb for i, cb in enumerate(self.pq.codebooks)}
-            np.savez_compressed("indexes/pq_codebooks.npz", **codebooks_metadata, **save_kwargs)
+            np.save("indexes/pq_codebooks.npy", self.pq.codebooks)
 
             # Encode vectors into PQ codes
             if os.path.exists(self.index_path):
                 os.remove(self.index_path) #Clean old index file if it exists
             self.pq_codes = np.memmap(self.index_path, dtype=np.uint8, mode='w+', shape=(num_records, self.M))
-            # save the pq_codes
-            pq_metadata = dict(num_records=num_records, M=self.M)
-            save_kwargs = {"pq_codes": self.pq_codes}
-            np.savez_compressed("indexes/pq_codes_metadata.npz", **pq_metadata, **save_kwargs)
             
             #Encode vectors into PQ codes in batches to save memory
             for start in range(0, num_records, self.batch_size):
@@ -217,4 +202,17 @@ class VecDB:
                 self.pq_codes[start:end] = codes_batch
             self.pq_codes.flush() #Ensure all memmap changes are written to disk.
 
+    def load_index(self):
+        """Load all needed index components from disk."""
+        
+        self.ivf.centroids = np.load("indexes/ivf_centroids.npy").astype(np.float32)
+        self.ivf.inverted_offsets = np.load("indexes/inverted_offsets.npy").astype(np.int32)
+        # load inverted ids as memmap for large size
+        self.ivf.inverted_ids = np.memmap("indexes/inverted_ids.npy", dtype=np.int32, mode="r")
+        
+        self.opq.R = np.load("indexes/opq_rotation.npy")
+        self.pq.codebooks = np.load("indexes/pq_codebooks.npy")
+        
+        num_records = self._get_num_records()
+        self.pq_codes = np.memmap(self.index_path, dtype=np.uint8, mode='r', shape=(num_records, self.M))
 
