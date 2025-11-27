@@ -46,7 +46,7 @@ class OPQPreprocessor:
             
             self.R, _ = orthogonal_procrustes(X, X_target)
             
-            print(f"Iteration {i+1} complete.")
+            #print(f"Iteration {i+1} complete.")
     
     def transform(self, X):
         if self.R is None:
