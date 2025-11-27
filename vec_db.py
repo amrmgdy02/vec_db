@@ -116,6 +116,48 @@ class VecDB:
         
         return result_ids
     
+    def retrieve_without_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
+        """
+        Retrieve top_k most similar vectors using IVF without PQ (brute-force within clusters).
+        
+        Search algorithm:
+        1. Find nprobe nearest IVF clusters
+        2. Get candidate vector IDs from those clusters
+        3. Compute exact distances to candidates
+        4. Return top_k nearest vectors
+        """
+        self.load_index()
+        
+        query = query.flatten()
+        
+        cluster_ids = self.ivf.search_clusters(query, self.nprobe)
+        candidate_ids = self.ivf.get_candidate_ids(cluster_ids)
+        
+        if len(candidate_ids) == 0:
+            print("Warning: No candidates found in IVF search")
+            return []
+        
+        candidate_vectors = np.array([self.get_one_row(cid) for cid in candidate_ids])
+        
+        distances = np.array([self._cal_score(query, vec) for vec in candidate_vectors])
+        
+        if len(candidate_ids) < top_k:
+            top_k_indices = np.argsort(-distances)
+        else:
+            top_k_indices = np.argpartition(-distances, top_k)[:top_k]
+            top_k_indices = top_k_indices[np.argsort(-distances[top_k_indices])]
+        
+        result_ids = [candidate_ids[i] for i in top_k_indices]
+        
+        return result_ids
+    
+    def _cal_score(self, vec1, vec2):
+        dot_product = np.dot(vec1, vec2)
+        norm_vec1 = np.linalg.norm(vec1)
+        norm_vec2 = np.linalg.norm(vec2)
+        cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
+        return cosine_similarity
+    
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
@@ -156,6 +198,9 @@ class VecDB:
             
             # save the centroids as numpy file
             centroids = self.ivf.centroids.astype(np.float32)
+            # create indexes folder if not exists
+            if not os.path.exists("indexes"):
+                os.makedirs("indexes")
             np.save("indexes/ivf_centroids.npy", centroids, allow_pickle=False)
             
             print("Assigning vectors to IVF clusters...")
