@@ -37,17 +37,33 @@ class InvertedFileIndex:
         # Store the trained centroids
         self.centroids = kmeans.cluster_centers_.astype(np.float32)
     
-    def assign(self, vectors: np.ndarray, batch_size: int) -> np.ndarray:
+    def assign(self, vectors: np.memmap, batch_size: int) -> np.memmap:
         """
-        Assign vectors to their nearest cluster
+        Assign vectors to their nearest cluster using matrix multiplication.
         """
         num_vectors = vectors.shape[0]
-        assignments = np.zeros(num_vectors, dtype=np.int32)
+        assignments = np.memmap("assignments.dat", dtype=np.int32, mode='w+', shape=(num_vectors,))
+        
+        # Precompute centroid norms (Equation part: ||B||^2)
+        # Shape: (Num_Centroids,)
+        centroid_norms = np.sum(self.centroids ** 2, axis=1)
         
         for start in range(0, num_vectors, batch_size):
             end = min(start + batch_size, num_vectors)
             batch = vectors[start:end].astype(np.float32)
-            distances = np.sum((batch[:, None, :] - self.centroids[None, :, :]) ** 2, axis=2)
+            
+            # 1. Compute Batch norms (Equation part: ||A||^2)
+            # Shape: (Batch_Size, 1)
+            batch_norms = np.sum(batch ** 2, axis=1, keepdims=True)
+            
+            # 2. Compute Dot Product (Equation part: 2A.B)
+            # Shape: (Batch_Size, Num_Centroids)
+            dot_product = np.dot(batch, self.centroids.T)
+            
+            # 3. Combine to get Squared Distance
+            # Broadcasting: (B, 1) + (K,) - (B, K) -> (B, K)
+            distances = batch_norms + centroid_norms - 2 * dot_product
+            
             assignments[start:end] = np.argmin(distances, axis=1)
         
         return assignments

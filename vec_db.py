@@ -16,10 +16,10 @@ class VecDB:
                  use_pq=True, 
                  new_db = True, 
                  db_size = None, 
-                 M=8, 
+                 M=16, 
                  Ks=256, 
                  num_clusters=1000, 
-                 nprobe=100, 
+                 nprobe=32, 
                  batch_size=131_072) -> None:
         
         self.db_path = database_file_path
@@ -88,48 +88,90 @@ class VecDB:
         else:
             return self.retrieve_without_pq(query, top_k)
     
-    def retrieve_with_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
-        """
-        Retrieve top_k most similar vectors using IVF-PQ.
-        
-        Search algorithm:
-        1. Rotate query using OPQ
-        2. Find nprobe nearest IVF clusters
-        3. Get candidate vector IDs from those clusters
-        4. Compute ADC distances to candidates using PQ codes
-        5. Return top_k nearest vectors
-        """
+    def retrieve_with_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, refine_factor=100):
+        # 1. Ask PQ for MORE results than we need (The Shortlist)
+        shortlist_k = top_k * refine_factor  # e.g., 5 * 100 = 500
+
         self.load_index(use_pq=True)
         query = query.flatten() / np.linalg.norm(query)
         
         cluster_ids = self.ivf.search_clusters(query, self.nprobe)
-        candidate_ids = self.ivf.get_candidate_ids(cluster_ids) # Needs to get inverted lists (ids and offsets) from index file
+        candidate_ids = self.ivf.get_candidate_ids(cluster_ids)
         
         if len(candidate_ids) == 0:
             print("Warning: No candidates found in IVF search")
             return []
         
-        # 3. Get PQ codes for candidates
-        candidate_codes = self.pq_codes[candidate_ids] # Needs to load pq_codes from disk (for each vector, List of size M)
+        # 3. Get PQ codes
+        candidate_codes = self.pq_codes[candidate_ids]
         
-        # 4. Rotate query using OPQ
-        query_rotated = self.opq.transform(query.reshape(1, -1)).flatten()  # Needs to get R from index file
+        # 4. Rotate query
+        query_rotated = self.opq.transform(query.reshape(1, -1)).flatten()
         
-        # 5. Compute ADC distances using PQ
-        distances = adc_distance(query_rotated, candidate_codes, self.pq) # Needs to load Centroids (codebooks) from index file
+        # 5. Compute ADC distances
+        distances = adc_distance(query_rotated, candidate_codes, self.pq)
         
-        # 6. Get top_k nearest (smallest distances)
-        # Note: ADC returns squared distances, so smaller is better
-        if len(candidate_ids) < top_k:
-            top_k_indices = np.argsort(distances)
+        # -------------------------------------------------------------
+        # FIX 1: Use 'shortlist_k' here, NOT 'top_k'
+        # -------------------------------------------------------------
+        # We want the top 500 candidates from PQ, not just the top 5.
+        
+        k_to_fetch = min(shortlist_k, len(candidate_ids))
+
+        if len(candidate_ids) <= k_to_fetch:
+            shortlist_indices = np.argsort(distances)
         else:
-            top_k_indices = np.argpartition(distances, top_k)[:top_k]
-            top_k_indices = top_k_indices[np.argsort(distances[top_k_indices])]
+            # Partition to get the best 'shortlist_k' (unsorted order is fine for re-ranking)
+            shortlist_indices = np.argpartition(distances, k_to_fetch)[:k_to_fetch]
         
-        # Map back to original vector IDs
-        result_ids = [candidate_ids[i] for i in top_k_indices]
+        # Map back to global IDs
+        # These are the 500 candidates we will load from disk
+        result_ids = [candidate_ids[i] for i in shortlist_indices]
+
+        # -------------------------------------------------------------
+        # Re-Ranking Step (Now applied to 500 vectors)
+        # -------------------------------------------------------------
+        if len(result_ids) == 0:
+            return []
+
+        # 1. Load RAW vectors
+        raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
+                           shape=(self._get_num_records(), DIMENSION))
         
-        return result_ids
+        shortlist_vectors = np.zeros((len(result_ids), DIMENSION), dtype=np.float32)
+        
+        # Sort IDs for sequential disk access
+        sorted_pairs = sorted(enumerate(result_ids), key=lambda x: x[1])
+        sorted_ids = [p[1] for p in sorted_pairs]
+        original_indices = [p[0] for p in sorted_pairs] # Keep track of where they go
+        
+        for i, vector_id in enumerate(sorted_ids):
+            shortlist_vectors[i] = raw_db[vector_id]
+        
+        # -------------------------------------------------------------
+        # FIX 2: Safety Normalization
+        # -------------------------------------------------------------
+        # Even if DB is normalized, re-normalizing here costs nothing (N=500) 
+        # and prevents bugs if raw_db has floating point drift.
+        norms = np.linalg.norm(shortlist_vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        shortlist_vectors /= norms
+        
+        # 2. Exact Cosine Similarity
+        # Note: 'query' was already normalized at the start of the function
+        exact_scores = np.dot(shortlist_vectors, query)
+        
+        # 3. Final Sort
+        # We match scores back to the IDs
+        final_pairs = list(zip(sorted_ids, exact_scores))
+        
+        # Sort descending (Higher Score = Better)
+        final_pairs.sort(key=lambda x: x[1], reverse=True)
+        
+        # 4. Return Final Top K
+        final_top_k_ids = [p[0] for p in final_pairs[:top_k]]
+        
+        return final_top_k_ids
     
     def retrieve_without_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
         """
@@ -170,13 +212,6 @@ class VecDB:
         result_ids = [candidate_ids[i] for i in top_k_indices]
         
         return result_ids
-    
-    def _cal_score(self, vec1, vec2):
-        dot_product = np.dot(vec1, vec2)
-        norm_vec1 = np.linalg.norm(vec1)
-        norm_vec2 = np.linalg.norm(vec2)
-        cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
-        return cosine_similarity
     
     def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)

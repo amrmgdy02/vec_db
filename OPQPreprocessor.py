@@ -35,7 +35,7 @@ class OPQPreprocessor:
                 sub_vectors = X_rotated[:, start:end]
                 
                 # Run fast K-Means on this slice
-                kmeans = KMeans(n_clusters=self.Ks, n_init=1, random_state=self.seed + m)
+                kmeans = KMeans(n_clusters=self.Ks, n_init='auto', random_state=self.seed + m)
                 kmeans.fit(sub_vectors)
                 
                 # Find nearest centroids (Assignment)
