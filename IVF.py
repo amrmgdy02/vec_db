@@ -41,15 +41,28 @@ class InvertedFileIndex:
         """
         Assign vectors to their nearest cluster
         """
+        if self.centroids is None:
+            raise ValueError("Centroids are not initialized. Call fit() before assign().")
+
         num_vectors = vectors.shape[0]
-        assignments = np.zeros(num_vectors, dtype=np.int32)
-        
+        assignments = np.empty(num_vectors, dtype=np.int32)
+
+        # keep centroids in memory and precompute norms (small: K x D)
+        centroids = self.centroids.astype(np.float32)
+        centroid_norms = np.sum(centroids * centroids, axis=1)  # shape (K,)
+
         for start in range(0, num_vectors, batch_size):
             end = min(start + batch_size, num_vectors)
+            # slice from vectors (this will be a contiguous read if `vectors` is a memmap)
             batch = vectors[start:end].astype(np.float32)
-            distances = np.sum((batch[:, None, :] - self.centroids[None, :, :]) ** 2, axis=2)
-            assignments[start:end] = np.argmin(distances, axis=1)
-        
+
+            # compute squared distances using norms + dot-product to avoid (B, K, D) temporary
+            batch_norms = np.sum(batch * batch, axis=1)            # shape (B,)
+            dots = batch @ centroids.T                             # shape (B, K)
+            dists = batch_norms[:, None] + centroid_norms[None, :] - 2.0 * dots
+
+            assignments[start:end] = np.argmin(dists, axis=1)
+
         return assignments
     
     def build_inverted_lists(self, assignments: np.ndarray) -> None:
