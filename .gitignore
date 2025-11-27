@@ -1,2 +1,4 @@
 *.dat
 *.txt
+/indexes/
+/models/

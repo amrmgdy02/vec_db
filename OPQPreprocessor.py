@@ -5,16 +5,17 @@ import pickle
 import numpy as np
 
 class OPQPreprocessor:
-    def __init__(self, num_subvectors: int, num_centroids: int, iterations: int = 20):
+    def __init__(self, num_subvectors: int, num_centroids: int, iterations: int = 20, seed: int = 42):
         self.M = num_subvectors
         self.Ks = num_centroids
         self.iterations = iterations
+        self.seed = seed
         self.R = None # Rotation matrix
 
     def fit(self, X):
         D = X.shape[1]
         
-        pca = PCA(n_components=D)
+        pca = PCA(n_components=D, random_state=self.seed)
         pca.fit(X)
         
         self.R = pca.components_.T
@@ -34,7 +35,7 @@ class OPQPreprocessor:
                 sub_vectors = X_rotated[:, start:end]
                 
                 # Run fast K-Means on this slice
-                kmeans = KMeans(n_clusters=self.Ks, n_init=1)
+                kmeans = KMeans(n_clusters=self.Ks, n_init=1, random_state=self.seed + m)
                 kmeans.fit(sub_vectors)
                 
                 # Find nearest centroids (Assignment)
@@ -57,6 +58,7 @@ class OPQPreprocessor:
         state = {
             'num_subvectors': self.M,
             'num_centroids': self.Ks,
+            'seed': self.seed,
             'R': self.R
         }
         with open(filepath, 'wb') as f:
@@ -72,7 +74,8 @@ class OPQPreprocessor:
         # Create a new instance with the loaded config
         instance = cls(
             num_subvectors=state['num_subvectors'],
-            num_centroids=state['num_centroids']
+            num_centroids=state['num_centroids'],
+            seed=state.get('seed', 42)  # Default to 42 for backward compatibility
         )
         instance.R = state['R'] # Restore the rotation matrix
         return instance
