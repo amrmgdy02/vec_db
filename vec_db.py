@@ -127,6 +127,10 @@ class VecDB:
             self.first_level_num_clusters = int(np.sqrt(self.total_clusters_num))
             self.second_level_num_clusters = self.total_clusters_num // self.first_level_num_clusters
             
+            if num_records > 15_000_000:
+                self.nprobe1 = 1
+                self.nprobe2 = 5
+            
             vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=(num_records, DIMENSION)) 
 
             batch = self.batch_size
