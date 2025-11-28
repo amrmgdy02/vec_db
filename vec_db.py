@@ -307,15 +307,15 @@ class VecDB:
 
     def load_index(self, use_pq=True):
         """Load all needed index components from disk."""
-        
-        self.ivf.centroids = np.load("indexes/ivf_centroids.npy")
-        self.ivf.inverted_offsets = np.load("indexes/inverted_offsets.npy")
+        db_size_str = self.db_path.split("_emb_")[0]  # get the number before 'M'
+        self.ivf.centroids = np.load(f"indexes/{db_size_str}_ivf_centroids.npy")
+        self.ivf.inverted_offsets = np.load(f"indexes/{db_size_str}_inverted_offsets.npy")
         # load inverted ids as memmap for large size
-        self.ivf.inverted_ids = np.load("indexes/inverted_ids.npy", mmap_mode="r")
+        self.ivf.inverted_ids = np.load(f"indexes/{db_size_str}_inverted_ids.npy", mmap_mode="r")
         
         if use_pq:
-            self.opq.R = np.load("indexes/opq_rotation.npy")
-            self.pq.codebooks = np.load("indexes/pq_codebooks.npy")
+            self.opq.R = np.load(f"indexes/{db_size_str}_opq_rotation.npy")
+            self.pq.codebooks = np.load(f"indexes/{db_size_str}_pq_codebooks.npy")
             
             num_records = self._get_num_records()
             self.pq_codes = np.memmap(self.index_path, dtype=np.uint8, mode='r', shape=(num_records, self.M))

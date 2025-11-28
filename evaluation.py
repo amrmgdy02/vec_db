@@ -137,27 +137,43 @@ def eval():
         "1M": {
             "database_file_path": "1M_emb_64.dat",
             "index_file_path": "1M_index_64.dat",
-            "size": 10**6
+            "size": 10**6,
+            "M": 16,      # <--- Crucial: 1M uses M=16
+            "nprobe": 64
         },
         "10M": {
             "database_file_path": "10M_emb_64.dat",
             "index_file_path": "10M_index_64.dat",
-            "size": 10 * 10**6
+            "size": 10 * 10**6,
+            "M": 8,       # <--- Others use M=8
+            "nprobe": 64
         },
         "15M": {
             "database_file_path": "15M_emb_64.dat",
             "index_file_path": "15M_index_64.dat",
-            "size": 15 * 10**6
+            "size": 15 * 10**6,
+            "M": 8,
+            "nprobe": 64
         },
         "20M": {
             "database_file_path": "20M_emb_64.dat",
             "index_file_path": "20M_index_64.dat",
-            "size": 20 * 10**6
+            "size": 20 * 10**6,
+            "M": 8,
+            "nprobe": 128
         }
     }
 
     for db_name, info in database_info.items():
-        db = VecDB(database_file_path = info["database_file_path"], index_file_path = info["index_file_path"], new_db = False)
+        # UPDATE: Pass M and nprobe to VecDB
+        db = VecDB(
+            database_file_path=info["database_file_path"], 
+            index_file_path=info["index_file_path"], 
+            new_db=False,
+            M=info["M"],           # <--- Pass M so query slicing is correct
+            nprobe=info["nprobe"]  # <--- Pass nprobe for consistent recall
+        )
+        
         actual_ids = get_actual_ids_first_k(actual_sorted_ids_20m, info["size"])
         # Make a dummy run query to make everything fresh and loaded (wrap up)
         res = run_queries(db, query_dummy, 5, actual_ids, 1)
@@ -281,5 +297,5 @@ def generate_dbs():
 
 if __name__ == "__main__":
     # generate_dbs()
-    build_indices()
-    # eval()
+    # build_indices()
+    eval()
