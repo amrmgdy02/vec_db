@@ -20,6 +20,7 @@ class VecDB:
                  Ks=256, 
                  num_clusters=16384, 
                  nprobe=128, 
+                 S_ivf=131_072,
                  batch_size=131_072) -> None:
         
         self.db_path = database_file_path
@@ -30,6 +31,7 @@ class VecDB:
         self.num_clusters = num_clusters  
         self.nprobe = nprobe              
         self.batch_size = batch_size
+        self.S_ivf = S_ivf
 
         self.pq: ProductQuantizer = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # PQ object
         self.opq: OPQPreprocessor = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # OPQ object
@@ -223,7 +225,9 @@ class VecDB:
     def _build_index(self, apply_pca=False):
             OPQ_SAMPLE_SIZE = 32_768 
             PQ_SAMPLE_SIZE = 262_144
-            IVF_SAMPLE_SIZE = 655_360
+            IVF_SAMPLE_SIZE = self.S_ivf
+
+            db_size_str = self.db_path.split("_emb_")[0]  # get the number before 'M'
 
             num_records = self._get_num_records()
             vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=(num_records, DIMENSION)) 
@@ -257,18 +261,18 @@ class VecDB:
             # create indexes folder if not exists
             if not os.path.exists("indexes"):
                 os.makedirs("indexes")
-            np.save("indexes/ivf_centroids.npy", centroids.astype(np.float32), allow_pickle=False)
+            np.save(f"indexes/{db_size_str}_ivf_centroids.npy", centroids.astype(np.float32), allow_pickle=False)
             
             print("Assigning vectors to IVF clusters...")
-            assignments = self.ivf.assign(vectors, batch_size=16384)
+            assignments = self.ivf.assign(vectors, batch_size=32_768)
             print("Assignment Completed")
             self.ivf.build_inverted_lists(assignments)
             #self.ivf.save("models/ivf_model.pkl")
             print("IVF assignment and inverted list building completed.")
             
             # save the inverted lists to index file
-            np.save("indexes/inverted_ids.npy", self.ivf.inverted_ids.astype(np.int32)) # large
-            np.save("indexes/inverted_offsets.npy", self.ivf.inverted_offsets.astype(np.int32)) # small
+            np.save(f"indexes/{db_size_str}_inverted_ids.npy", self.ivf.inverted_ids.astype(np.int32)) # large
+            np.save(f"indexes/{db_size_str}_inverted_offsets.npy", self.ivf.inverted_offsets.astype(np.int32)) # small
             
             print(" Training OPQ (Rotation)...")
             self.opq.fit(opq_train_data)
@@ -277,7 +281,7 @@ class VecDB:
             print(" OPQ training completed.")
             
             # save the rotation matrix
-            np.save("indexes/opq_rotation.npy", self.opq.R)
+            np.save(f"indexes/{db_size_str}_opq_rotation.npy", self.opq.R)
 
             pq_train_data = self.opq.transform(pq_train_data)
 
@@ -285,7 +289,7 @@ class VecDB:
             self.pq.fit(pq_train_data, batch_size=self.batch_size)
             
             # Save the codebooks
-            np.save("indexes/pq_codebooks.npy", self.pq.codebooks)
+            np.save(f"indexes/{db_size_str}_pq_codebooks.npy", self.pq.codebooks)
 
             # Encode vectors into PQ codes
             if os.path.exists(self.index_path):
