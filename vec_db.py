@@ -16,10 +16,10 @@ class VecDB:
                  use_pq=True, 
                  new_db = True, 
                  db_size = None, 
-                 M=16, 
+                 M=8, 
                  Ks=256, 
-                 num_clusters=1000, 
-                 nprobe=32, 
+                 num_clusters=16384, 
+                 nprobe=128, 
                  batch_size=131_072) -> None:
         
         self.db_path = database_file_path
@@ -31,9 +31,9 @@ class VecDB:
         self.nprobe = nprobe              
         self.batch_size = batch_size
 
-        self.pq: ProductQuantizer = None       # PQ object
-        self.opq: OPQPreprocessor = None       # OPQ object
-        self.ivf: InvertedFileIndex = None     # IVF object
+        self.pq: ProductQuantizer = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # PQ object
+        self.opq: OPQPreprocessor = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # OPQ object
+        self.ivf: InvertedFileIndex = InvertedFileIndex(num_clusters=self.num_clusters, seed=DB_SEED_NUMBER)     # IVF object
         self.pq_codes: np.memmap = None        # PQ codes stored on disk
         if new_db:
             if db_size is None:
@@ -223,16 +223,8 @@ class VecDB:
     def _build_index(self, apply_pca=False):
             OPQ_SAMPLE_SIZE = 32_768 
             PQ_SAMPLE_SIZE = 262_144
-            IVF_SAMPLE_SIZE = 262_144
-            
-            """
-            Build PQ index:
-            1) Load vectors in batches 
-            2) Optional PCA rotation for better PQ accuracy
-            3) Train PQ codebooks
-            4) Encode all vectors into PQ codes
-            5) Store PQ codes as memmap on disk
-            """
+            IVF_SAMPLE_SIZE = 655_360
+
             num_records = self._get_num_records()
             vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=(num_records, DIMENSION)) 
 
@@ -257,7 +249,6 @@ class VecDB:
             ivf_train_data = vectors[np.sort(ivf_indices)]
             
             print("Training IVF (Coarse Quantization)...")
-            self.ivf = InvertedFileIndex(num_clusters=self.num_clusters, seed=DB_SEED_NUMBER)
             self.ivf.fit(ivf_train_data, batch_size=self.batch_size)
             print("IVF training completed.")
             
@@ -269,7 +260,7 @@ class VecDB:
             np.save("indexes/ivf_centroids.npy", centroids.astype(np.float32), allow_pickle=False)
             
             print("Assigning vectors to IVF clusters...")
-            assignments = self.ivf.assign(vectors, batch_size=self.batch_size)
+            assignments = self.ivf.assign(vectors, batch_size=16384)
             print("Assignment Completed")
             self.ivf.build_inverted_lists(assignments)
             #self.ivf.save("models/ivf_model.pkl")
@@ -280,7 +271,6 @@ class VecDB:
             np.save("indexes/inverted_offsets.npy", self.ivf.inverted_offsets.astype(np.int32)) # small
             
             print(" Training OPQ (Rotation)...")
-            self.opq = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)
             self.opq.fit(opq_train_data)
             
             #self.opq.save("models/opq_model.pkl")
@@ -290,9 +280,6 @@ class VecDB:
             np.save("indexes/opq_rotation.npy", self.opq.R)
 
             pq_train_data = self.opq.transform(pq_train_data)
-
-            # Initialize PQ
-            self.pq = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)
 
             # Fit PQ codebooks (batch processing inside PQ)
             self.pq.fit(pq_train_data, batch_size=self.batch_size)
