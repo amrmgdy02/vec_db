@@ -13,9 +13,9 @@ class VecDB:
                  db_size = None, 
                  first_level_num_clusters=1000,
                  second_level_num_clusters=1000,
-                 nprobe1=50, 
-                 nprobe2=50,
-                 batch_size=32_768) -> None:
+                 nprobe1=5, 
+                 nprobe2=10,
+                 batch_size=131_072) -> None:
         
         self.db_path = database_file_path
         self.first_level_num_clusters = first_level_num_clusters
@@ -116,6 +116,17 @@ class VecDB:
             1) Load vectors in batches
             """
             num_records = self._get_num_records()
+            
+            print(" Building Index for ", num_records, "records")
+            
+            if num_records <= 1_000_000:
+                self.total_clusters_num = num_records // 1000
+            else:
+                self.total_clusters_num = int(np.sqrt(num_records))
+                
+            self.first_level_num_clusters = int(np.sqrt(self.total_clusters_num))
+            self.second_level_num_clusters = self.total_clusters_num // self.first_level_num_clusters
+            
             vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=(num_records, DIMENSION)) 
 
             batch = self.batch_size
