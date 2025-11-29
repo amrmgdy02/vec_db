@@ -1,5 +1,6 @@
 *.dat
 *.txt
+*.npy
 /indexes/
 /models/
 /__pycache__/
