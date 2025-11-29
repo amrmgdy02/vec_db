@@ -145,21 +145,21 @@ def eval():
             "database_file_path": "10M_emb_64.dat",
             "index_file_path": "10M_index_64.dat",
             "size": 10 * 10**6,
-            "M": 8,       # <--- Others use M=8
+            "M": 4,       # <--- Others use M=8
             "nprobe": 64
         },
         "15M": {
             "database_file_path": "15M_emb_64.dat",
             "index_file_path": "15M_index_64.dat",
             "size": 15 * 10**6,
-            "M": 8,
+            "M": 4,
             "nprobe": 64
         },
         "20M": {
             "database_file_path": "20M_emb_64.dat",
             "index_file_path": "20M_index_64.dat",
             "size": 20 * 10**6,
-            "M": 8,
+            "M": 4,
             "nprobe": 128
         }
     }
@@ -200,21 +200,21 @@ def build_indices():
                 "S_ivf": 131_072
             }, 
             "10M_emb_64.dat": {
-                "M": 8,
+                "M": 4,
                 "Ks": 256,
                 "nprobe": 64,
                 "n_clusters": 4096,
                 "S_ivf": 262_144
             }, 
             "15M_emb_64.dat": {
-                "M": 8,
+                "M": 4,
                 "Ks": 256,
                 "nprobe": 64,
                 "n_clusters": 8192,
                 "S_ivf": 393_216
             }, 
             "20M_emb_64.dat": {
-                "M": 8,
+                "M": 4,
                 "Ks": 256,
                 "nprobe": 128,
                 "n_clusters": 16384,
