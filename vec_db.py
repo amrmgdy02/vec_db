@@ -16,7 +16,7 @@ class VecDB:
                  use_pq=True, 
                  new_db = True, 
                  db_size = None, 
-                 M=8, 
+                 M=16, 
                  Ks=256, 
                  num_clusters=16384, 
                  nprobe=128, 
@@ -255,16 +255,13 @@ class VecDB:
             self.pq.fit(pq_train_data, batch_size=self.batch_size)
     
             print("Saving index to disk...")
-            # ensure index directory exists before writing files
-            os.makedirs(self.index_path, exist_ok=True)
-
-            np.save(os.path.join(self.index_path, f"{db_size_str}_ivf_centroids.npy"), self.ivf.centroids.astype(np.float32), allow_pickle=False)
-            np.save(os.path.join(self.index_path, f"{db_size_str}_inverted_ids.npy"), self.ivf.inverted_ids.astype(np.int32))
-            np.save(os.path.join(self.index_path, f"{db_size_str}_inverted_offsets.npy"), self.ivf.inverted_offsets.astype(np.int32))
-            np.save(os.path.join(self.index_path, f"{db_size_str}_opq_rotation.npy"), self.opq.R)
-            np.save(os.path.join(self.index_path, f"{db_size_str}_pq_codebooks.npy"), self.pq.codebooks)
-
-            self.pq_codes = np.memmap(os.path.join(self.index_path, f"{db_size_str}_pq_codes.dat"), dtype=np.uint8, mode='w+', shape=(num_records, self.M))
+            np.save(f"{self.index_path}/{db_size_str}_ivf_centroids.npy", self.ivf.centroids.astype(np.float32), allow_pickle=False)
+            np.save(f"{self.index_path}/{db_size_str}_inverted_ids.npy", self.ivf.inverted_ids.astype(np.int32))
+            np.save(f"{self.index_path}/{db_size_str}_inverted_offsets.npy", self.ivf.inverted_offsets.astype(np.int32))
+            np.save(f"{self.index_path}/{db_size_str}_opq_rotation.npy", self.opq.R)
+            np.save(f"{self.index_path}/{db_size_str}_pq_codebooks.npy", self.pq.codebooks)
+            
+            self.pq_codes = np.memmap(f"{self.index_path}/{db_size_str}_pq_codes.dat", dtype=np.uint8, mode='w+', shape=(num_records, self.M))
             
             for start in range(0, num_records, self.batch_size):
                 end = min(start + self.batch_size, num_records)
@@ -286,13 +283,13 @@ class VecDB:
         """
         
         db_size_str = self.db_path.split("_emb_")[0]  
-        self.ivf.centroids = np.load(os.path.join(self.index_path, f"{db_size_str}_ivf_centroids.npy"))
-        self.ivf.inverted_offsets = np.load(os.path.join(self.index_path, f"{db_size_str}_inverted_offsets.npy"))
-        self.ivf.inverted_ids = np.load(os.path.join(self.index_path, f"{db_size_str}_inverted_ids.npy"), mmap_mode="r")
+        self.ivf.centroids = np.load(f"{self.index_path}/{db_size_str}_ivf_centroids.npy")
+        self.ivf.inverted_offsets = np.load(f"{self.index_path}/{db_size_str}_inverted_offsets.npy")
+        self.ivf.inverted_ids = np.load(f"{self.index_path}/{db_size_str}_inverted_ids.npy", mmap_mode="r")
         
         if use_pq:
             num_records = self._get_num_records()
-            self.opq.R = np.load(os.path.join(self.index_path, f"{db_size_str}_opq_rotation.npy"))
-            self.pq.codebooks = np.load(os.path.join(self.index_path, f"{db_size_str}_pq_codebooks.npy"))
-            self.pq_codes = np.memmap(os.path.join(self.index_path, f"{db_size_str}_pq_codes.dat"), dtype=np.uint8, mode='r', shape=(num_records, self.M))
+            self.opq.R = np.load(f"{self.index_path}/{db_size_str}_opq_rotation.npy")
+            self.pq.codebooks = np.load(f"{self.index_path}/{db_size_str}_pq_codebooks.npy")
+            self.pq_codes = np.memmap(f"{self.index_path}/{db_size_str}_pq_codes.dat", dtype=np.uint8, mode='r', shape=(num_records, self.M))
 
