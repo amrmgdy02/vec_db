@@ -12,7 +12,7 @@ DIMENSION = 64
 
 class VecDB:
     def __init__(self, database_file_path = "saved_db.dat", 
-                 index_file_path = "indexes", 
+                 index_file_path = None, 
                  use_pq=True, 
                  new_db = True, 
                  db_size = None, 

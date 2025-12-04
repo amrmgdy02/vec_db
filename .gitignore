@@ -1,9 +1,6 @@
 *.dat
 *.txt
-<<<<<<< HEAD
 *.zip
-=======
->>>>>>> 3de2c126e319b02c966dcc07f3932637ae717d97
 *.npy
 /indexes/
 /models/
