@@ -150,36 +150,36 @@ class VecDB:
         if len(result_ids) == 0:
             return []
         # Sort IDs to ensure sequential disk access (faster I/O)
-        sorted_ids = np.array(sorted(result_ids))
+        sorted_ids = sorted(result_ids)
         
         # Initialize the memory map (Zero RAM cost until accessed)
         raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
                         shape=(self._get_num_records(), DIMENSION))
         
         final_pairs = []
-        BATCH_SIZE = 3  # Process 3 vectors at a time
-
-        # Loop through the candidates in batches
-        for i in range(0, len(sorted_ids), BATCH_SIZE):
-            # 1. Get the IDs for this batch
-            batch_ids = sorted_ids[i : i + BATCH_SIZE]
-            
-            # 2. Load Vectors from disk
-            batch_vectors = np.array(raw_db[batch_ids])
-            
-            # 3. Normalize (if your DB isn't pre-normalized)
-            norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
-            norms[norms == 0] = 1.0
-            batch_vectors /= norms
-
-            # 4. Compute Scores
-            batch_scores = np.dot(batch_vectors, query)
-            
-            # 5. Store results and immediately free 'batch_vectors'
-            final_pairs.extend(zip(batch_ids, batch_scores))
-            
-            # Explicit delete to be safe
-            del batch_vectors
+        
+        # Loop through ALL sorted_ids (no need for batching logic anymore, we do it per vector)
+        VECTOR_BYTE_SIZE = DIMENSION * 4 
+        
+        with open(self.db_path, "rb") as f:
+            for idx in sorted_ids:
+                # 1. Jump directly to the vector's location on disk
+                f.seek(idx * VECTOR_BYTE_SIZE)
+                
+                # 2. Read exactly 256 bytes (for 64 dims)
+                bytes_data = f.read(VECTOR_BYTE_SIZE)
+                
+                # 3. Convert bytes to numpy array
+                vector = np.frombuffer(bytes_data, dtype=np.float32)
+                
+                # 4. Compute Score (Standard Logic)
+                norm = np.linalg.norm(vector)
+                if norm > 0:
+                    score = np.dot(vector / norm, query)
+                else:
+                    score = np.dot(vector, query)
+                
+                final_pairs.append((idx, score))
 
         # Final Sort to get the true top_k
         final_pairs.sort(key=lambda x: x[1], reverse=True)
