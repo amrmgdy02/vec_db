@@ -107,63 +107,95 @@ class VecDB:
         vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
         return np.array(vectors)
     
-    def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
-        """Use separate cluster ids indexing structure
-
-        Args:
-            query (Annotated[np.ndarray,): Query vector for retrieval.
-            top_k (int, optional): Number of top similar vectors to retrieve. Defaults to 5.
-            refine_factor (int, optional): Refinement factor for re-ranking. Defaults to 100.
-            
-        Returns:
-            List of top_k most similar vector IDs.
-        """
+    def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
+        """Ultra memory-optimized retrieval - minimize all allocations"""
         refine_factor = 100
         shortlist_k = top_k * refine_factor 
 
         self.load_index()
-        query = query.flatten() / np.linalg.norm(query)
+        
+        # Normalize query in-place, reuse query array
+        query = query.flatten()
+        norm = np.linalg.norm(query)
+        if norm > 0:
+            query /= norm
         
         cluster_ids = self.ivf.search_clusters(query, self.nprobe)
         candidate_ids = self.ivf.get_candidate_ids(cluster_ids)
         
         if len(candidate_ids) == 0:
-            print("Warning: No candidates found in IVF search")
             return []
         
-        candidate_codes = self.pq_codes[candidate_ids]
+        batch_size = 5000
         query_rotated = self.opq.transform(query.reshape(1, -1)).flatten()
-        distances = adc_distance(query_rotated, candidate_codes, self.pq)
-    
+        
+        distances = np.empty(len(candidate_ids), dtype=np.float32)
+        
+        offset = 0
+        for i in range(0, len(candidate_ids), batch_size):
+            end_idx = min(i + batch_size, len(candidate_ids))
+            batch_ids = candidate_ids[i:end_idx]
+            
+            candidate_codes = self.pq_codes[batch_ids]
+            
+            batch_distances = adc_distance(query_rotated, candidate_codes, self.pq)
+            
+            distances[offset:offset + len(batch_distances)] = batch_distances
+            offset += len(batch_distances)
+            
+            del candidate_codes
+            del batch_distances
+        
         k_to_fetch = min(shortlist_k, len(candidate_ids))
-        if len(candidate_ids) <= k_to_fetch:
+        if k_to_fetch >= len(distances):
             shortlist_indices = np.argsort(distances)
         else:
             shortlist_indices = np.argpartition(distances, k_to_fetch)[:k_to_fetch]
         
-        result_ids = [candidate_ids[i] for i in shortlist_indices]
-
+        result_ids = candidate_ids[shortlist_indices]
+        
+        del distances
+        del candidate_ids
+        del shortlist_indices
+        
         if len(result_ids) == 0:
             return []
 
-        # Re-rank with exact distances
+        # Re-rank with MINIMAL memory: process in tiny batches
         raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
-                           shape=(self._get_num_records(), DIMENSION))
+                        shape=(self._get_num_records(), DIMENSION))
         
-        sorted_ids = np.array(sorted(result_ids))
-        shortlist_vectors = np.array(raw_db[sorted_ids])
+        # Ultra-small batches for re-ranking
+        rerank_batch_size = 500
+        top_results = []  # Store (id, score) tuples
         
-        norms = np.linalg.norm(shortlist_vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        shortlist_vectors /= norms
+        for i in range(0, len(result_ids), rerank_batch_size):
+            batch_ids = result_ids[i:i + rerank_batch_size]
+            
+            # Process each vector individually to minimize peak memory
+            for vid in batch_ids:
+                vec = raw_db[vid].copy()  # Load single vector
+                
+                # Normalize
+                vec_norm = np.linalg.norm(vec)
+                if vec_norm > 0:
+                    vec /= vec_norm
+                
+                score = np.dot(vec, query)
+                top_results.append((int(vid), float(score)))
+                
+                del vec  
         
-        exact_scores = np.dot(shortlist_vectors, query)
+        top_results.sort(key=lambda x: x[1], reverse=True)
         
-        final_pairs = list(zip(sorted_ids, exact_scores))
-        final_pairs.sort(key=lambda x: x[1], reverse=True)
+        final_ids = [p[0] for p in top_results[:top_k]]
         
-        final_top_k_ids = [int(p[0]) for p in final_pairs[:top_k]]
-        return final_top_k_ids
+        # Cleanup
+        del top_results
+        del result_ids
+        
+        return final_ids
+
         
     
     def _cal_score(self, vec1, vec2):
@@ -258,19 +290,19 @@ class VecDB:
             print("Index saved to disk.")
 
     def load_index(self) -> None:
-        """
-        Load all needed index components from disk.
-        Args:
-            use_pq (bool, optional): Whether to load PQ components. Defaults to True.
-        
-        """
+        """Lazy load only metadata, keep heavy data as memmap"""
         db_size_str = self.db_path.split("_emb_")[0]  
+        
         self.ivf.centroids = np.load(f"{self.index_path}/{db_size_str}_ivf_centroids.npy")
-        
         self.ivf.cluster_dir = f"{self.index_path}/{db_size_str}_clusters"
-        
         num_records = self._get_num_records()
         self.opq.R = np.load(f"{self.index_path}/{db_size_str}_opq_rotation.npy")
         self.pq.codebooks = np.load(f"{self.index_path}/{db_size_str}_pq_codebooks.npy")
-        self.pq_codes = np.memmap(f"{self.index_path}/{db_size_str}_pq_codes.dat", dtype=np.uint8, mode='r', shape=(num_records, self.M))
-
+        
+        # Keep PQ codes as memmap
+        self.pq_codes = np.memmap(
+            f"{self.index_path}/{db_size_str}_pq_codes.dat", 
+            dtype=np.uint8, 
+            mode='r', 
+            shape=(num_records, self.M)
+        )

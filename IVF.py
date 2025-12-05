@@ -98,40 +98,52 @@ class InvertedFileIndex:
             f"Max size: {cluster_sizes.max()}, Avg size: {cluster_sizes.mean():.1f}")
     
     def search_clusters(self, query: np.ndarray, nprobe: int) -> List[int]:
-        """
-        Find the nprobe nearest clusters to the query vector.
-        Memory-efficient: uses dot product formula to avoid (K, D) temporary array.
-        """
-        query = query.astype(np.float32)
+        if query.dtype != np.float32:
+            query = query.astype(np.float32, copy=False)
         
-        # dot product formula: ||x-c||^2 = ||x||^2 + ||c||^2 - 2*x·c
-        #query_norm_sq = np.dot(query, query)
-        centroid_norms_sq = np.sum(self.centroids ** 2, axis=1)
+        # Compute distances without intermediate arrays
+        centroid_norms_sq = np.einsum('ij,ij->i', self.centroids, self.centroids)
         dot_products = np.dot(self.centroids, query)
-        
         distances = centroid_norms_sq - 2 * dot_products
         
         if nprobe < len(distances):
             nearest_clusters = np.argpartition(distances, nprobe)[:nprobe]
         else:
             nearest_clusters = np.arange(len(distances))
+            
+        # Cleanup
+        del distances
+        del dot_products
+        del centroid_norms_sq
         
         return nearest_clusters.tolist()
     
 
     def get_candidate_ids(self, cluster_ids: List[int]) -> np.ndarray:
-        """
-        Get candidate IDs using offset-based lookup or per-cluster files.
-        Memory-efficient: loads only requested clusters.
-        """
         candidates = []
+        
         for cluster_id in cluster_ids:
             cluster_file = f"{self.cluster_dir}/cluster_{cluster_id}.npy"
             if os.path.exists(cluster_file):
-                cluster_data = np.load(cluster_file)
-                candidates.append(cluster_data)
-                # close cluster_data to free memory
+                # Use mmap_mode to avoid loading entire file into memory
+                cluster_data = np.load(cluster_file, mmap_mode='r')
+                # Copy only what we need
+                candidates.append(cluster_data.copy())
                 del cluster_data
-            
-        return np.concatenate(candidates) if candidates else np.array([], dtype=np.int32)
+        
+        if not candidates:
+            return np.array([], dtype=np.int32)
+        
+        # Concatenate more efficiently
+        total_size = sum(c.shape[0] for c in candidates)
+        result = np.empty(total_size, dtype=np.int32)
+        offset = 0
+        for c in candidates:
+            size = c.shape[0]
+            result[offset:offset + size] = c
+            offset += size
+            del c
+        
+        del candidates
+        return result
         

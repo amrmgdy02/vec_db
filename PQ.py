@@ -89,16 +89,17 @@ class ProductQuantizer:
 
         num_vectors = vectors.shape[0]
 
-        for i in range(self.num_subvectors):
-            centroids = self.codebooks[i].astype(np.float32) 
-
-            for start in range(0, num_vectors, batch_size):
-                end = min(start + batch_size, num_vectors)
-                batch = vectors[start:end, i*subvector_dim:(i+1)*subvector_dim].astype(np.float32)
-
-                # Compute squared L2 distances (no sqrt)
-                distances = ((batch[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
-
+        for start in range(0, num_vectors, batch_size):
+            end = min(start + batch_size, num_vectors)
+            batch = vectors[start:end].astype(np.float32)
+            
+            # Process all subvectors for this batch at once
+            for i in range(self.num_subvectors):
+                subvec = batch[:, i*subvector_dim:(i+1)*subvector_dim]
+                centroids = self.codebooks[i]
+                
+                # Vectorized distance computation using broadcasting
+                distances = np.sum((subvec[:, None, :] - centroids[None, :, :]) ** 2, axis=2)
                 codes[start:end, i] = np.argmin(distances, axis=1)
 
         return codes
@@ -127,29 +128,21 @@ class ProductQuantizer:
     #     return reconstructed
 
 
-def adc_distance(query: np.ndarray, codes: np.ndarray, pq: ProductQuantizer) -> np.ndarray:
-    """
-    Compute ADC distances from a query to PQ-coded database.
-    Optimized for large datasets.
-    Args:
-        query (np.ndarray): Query vector, shape (dimension,)
-        codes (np.ndarray): PQ codes of database vectors, shape (num_vectors, num_subvectors)
-        pq (ProductQuantizer): Trained ProductQuantizer instance.
-    Returns:
-        np.ndarray: Distances from query to each database vector, shape (num_vectors,)
-    """
+def adc_distance(query: np.ndarray, codes: np.ndarray, pq) -> np.ndarray:
+    """Memory-optimized ADC distance computation"""
     M = pq.num_subvectors
-    Ks = pq.num_centroids
     subdim = query.shape[0] // M
 
-    # 1) Build Lookup Table: shape (M, Ks)
-    lookup = np.zeros((M, Ks), dtype=np.float32)
+    query_reshaped = query.reshape(M, subdim).astype(np.float32, copy=False)
+    
+    lookup = np.empty((M, pq.num_centroids), dtype=np.float32)
+    
     for m in range(M):
-        start, end = m*subdim, (m+1)*subdim
-        subq = query[start:end].astype(np.float32)
-        centroids = pq.codebooks[m].astype(np.float32)
-        lookup[m] = ((centroids - subq[None, :])**2).sum(axis=1)  # squared L2 distance
+        cb = pq.codebooks[m].astype(np.float32, copy=False)
+        
+        diff = cb - query_reshaped[m]
+        lookup[m] = np.sum(diff * diff, axis=1)
 
-    # 2) Vectorized scoring using lookup table
-    distances = lookup[np.arange(M)[:, None], codes.T].sum(axis=0)  # shape (N,)
+    distances = lookup[np.arange(M)[:, None], codes.T].sum(axis=0)
+    
     return distances
