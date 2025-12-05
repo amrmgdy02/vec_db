@@ -34,7 +34,7 @@ class VecDB:
         self.S_ivf = S_ivf
         # check which number does db_path contain 
         if self.db_path is not None and "1M" in self.db_path:
-            self.M = 16
+            self.M = 4
             self.num_clusters = 1024
             self.nprobe = 64
         elif self.db_path is not None and "10M" in self.db_path:
@@ -299,8 +299,8 @@ class VecDB:
             
             self.pq_codes = np.memmap(f"{self.index_path}/{db_size_str}_pq_codes.dat", dtype=np.uint8, mode='w+', shape=(num_records, self.M))
             
-            metadata = np.array([self.M, self.Ks, self.num_clusters, self.nprobe], dtype=np.int32)
-            np.save(os.path.join(self.index_path, f"{db_size_str}_metadata.npy"), metadata)
+            # metadata = np.array([self.M, self.Ks, self.num_clusters, self.nprobe], dtype=np.int32)
+            # np.save(os.path.join(self.index_path, f"{db_size_str}_metadata.npy"), metadata)
             
             for start in range(0, num_records, self.batch_size):
                 end = min(start + self.batch_size, num_records)
