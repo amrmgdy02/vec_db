@@ -8,11 +8,12 @@ ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 64
 
 class VecDB:
-    def __init__(self, database_file_path = "saved_db.dat", 
+    def __init__(self, database_file_path = "saved_db.dat",
+                 index_file_path = "saved_index",
                  new_db = True, 
                  db_size = None, 
-                 first_level_num_clusters=1000,
-                 second_level_num_clusters=1000,
+                 first_level_num_clusters=256,
+                 second_level_num_clusters=256,
                  nprobe1=5, 
                  nprobe2=10,
                  batch_size=131_072) -> None:
@@ -24,6 +25,7 @@ class VecDB:
         self.nprobe2 = nprobe2
         self.batch_size = batch_size
         self.twolevel: TwoLevelIVF = None      # Two-level IVF
+        self.index_path = index_file_path
         
         if new_db:
             if db_size is None:
@@ -73,24 +75,29 @@ class VecDB:
         return np.array(vectors)
 
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
-        """Retrieve using the trained two-level IVF (with OPQ rotation applied if present)."""
-        self.load_index(use_pq=False)
+        """Retrieve using the trained two-level IVF with on-demand cluster file loading."""
+        # Load index only once (not every query)
+        if self.twolevel is None or self.twolevel.centroids1 is None:
+            self.load_index()
+        
         query = query.flatten() / np.linalg.norm(query)
 
-        candidate_ids = self.twolevel.search(query, nprobe1=self.nprobe1, nprobe2=self.nprobe2)
+        candidate_ids = self.twolevel.search(query, 
+                                            nprobe1=self.nprobe1, 
+                                            nprobe2=self.nprobe2,
+                                            cluster_dir=self.index_path)
 
         if len(candidate_ids) == 0:
             print("Warning: No candidates found in two-level IVF search")
             return []
-
-        # Read candidate vectors from DB memmap
+        
         num_records = self._get_num_records()
         candidate_ids = np.asarray(candidate_ids, dtype=np.int64)
         db_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
         candidate_vectors = np.asarray(db_vectors[candidate_ids])
 
-        # compute cosine similarities
-        distances = np.array([self._cal_score(query, vec) for vec in candidate_vectors])
+        dot_products = candidate_vectors @ query
+        distances = dot_products
 
         if len(candidate_ids) < top_k:
             top_k_indices = np.argsort(-distances)
@@ -109,7 +116,7 @@ class VecDB:
         return cosine_similarity
 
     def _build_index(self):
-            IVF_SAMPLE_SIZE = 262_144
+            IVF_SAMPLE_SIZE = 500_000
             
             """
             Build PQ index:
@@ -127,21 +134,23 @@ class VecDB:
             self.first_level_num_clusters = int(np.sqrt(self.total_clusters_num))
             self.second_level_num_clusters = self.total_clusters_num // self.first_level_num_clusters
             
-            if num_records > 15_000_000:
-                self.nprobe1 = 1
+            nprobe = int(np.sqrt(self.total_clusters_num))
+            self.nprobe1 = int(np.sqrt(nprobe))
+            self.nprobe2 = nprobe // self.nprobe1
+            # check num of rows
+            if num_records == 20_000_000:
+                self.nprobe1 = 5
                 self.nprobe2 = 5
             
             vectors = np.memmap(self.db_path, dtype=np.float32, mode='r+', shape=(num_records, DIMENSION)) 
-
-            batch = self.batch_size
-            for start in range(0, num_records, batch):
-                end = min(start + batch, num_records)
-                block = vectors[start:end]        
-                norms = np.linalg.norm(block.astype(np.float32), axis=1, keepdims=True).astype(np.float32)
-                norms[norms == 0] = 1.0
-                block /= norms
+            # normalize all vectors
+            for start in range(0, num_records, self.batch_size):
+                end = min(start + self.batch_size, num_records)
+                batch = vectors[start:end]
+                norms = np.linalg.norm(batch, axis=1, keepdims=True)
+                batch /= norms
+                vectors[start:end] = batch
             
-            vectors.flush()
 
             rng = np.random.default_rng(DB_SEED_NUMBER)
             ivf_indices = rng.choice(num_records, size=min(IVF_SAMPLE_SIZE, num_records), replace=False)
@@ -156,39 +165,56 @@ class VecDB:
             assignments = self.twolevel.assign(vectors, batch_size=self.batch_size)
             print("Assignment Completed")
 
-            # Build flattened inverted lists from assignments
-            total_clusters = self.twolevel.K1 * self.twolevel.K2
-            cluster_sizes = np.bincount(assignments, minlength=total_clusters)
-            self.twolevel.inverted_ids = np.zeros(len(assignments), dtype=np.int32)
-            self.twolevel.inverted_offsets = np.zeros(total_clusters + 1, dtype=np.int32)
-            self.twolevel.inverted_offsets[1:] = np.cumsum(cluster_sizes)
-            current_pos = self.twolevel.inverted_offsets.copy()
-            for vec_id, cluster_id in enumerate(assignments):
-                pos = current_pos[cluster_id]
-                self.twolevel.inverted_ids[pos] = vec_id
-                current_pos[cluster_id] += 1
-
-            print("Two-level assignment and inverted list building completed.")
-
-            # ensure index directory exists
             if not os.path.exists("indexes"):
                 os.makedirs("indexes")
-            np.save("indexes/ivf1_centroids.npy", self.twolevel.centroids1.astype(np.float32), allow_pickle=False)
-            np.savez("indexes/ivf2_centroids.npz", *self.twolevel.centroids2)
-            np.save("indexes/inverted_ids.npy", self.twolevel.inverted_ids.astype(np.int32))
-            np.save("indexes/inverted_offsets.npy", self.twolevel.inverted_offsets.astype(np.int32))
             
+            np.save("indexes/ivf1_centroids.npy", self.twolevel.centroids1.astype(np.float32))
+            # Save centroids2 as a list of arrays using pickle
+            import pickle
+            with open("indexes/ivf2_centroids.pkl", "wb") as f:
+                pickle.dump(self.twolevel.centroids2, f)
+            
+            print("Saving cluster files in hierarchical structure...")
+            
+            # Group vectors by their cluster assignments
+            total_clusters = self.twolevel.K1 * self.twolevel.K2
+            cluster_vectors = [[] for _ in range(total_clusters)]
+            
+            for vec_id, cluster_id in enumerate(assignments):
+                cluster_vectors[cluster_id].append(vec_id)
+            
+            # Save to hierarchical file structure
+            for first_level_id in range(self.twolevel.K1):
+                first_level_dir = f"indexes/cluster_L1_{first_level_id}"
+                os.makedirs(first_level_dir, exist_ok=True)
+                
+                # Save each second-level cluster within this first-level cluster
+                for second_level_id in range(self.twolevel.K2):
+                    # Calculate flattened cluster ID
+                    flat_cluster_id = first_level_id * self.twolevel.K2 + second_level_id
+                    
+                    # Get vector IDs for this cluster
+                    cluster_vector_ids = np.array(cluster_vectors[flat_cluster_id], dtype=np.int32)
+                    
+                    # Save to file
+                    cluster_file = f"{first_level_dir}/cluster_L2_{second_level_id}.npy"
+                    np.save(cluster_file, cluster_vector_ids)
+            
+            print(f"Saved {self.twolevel.K1} first-level directories with {self.twolevel.K2} files each")
 
-    def load_index(self, use_pq=True):
-        """Load all needed index components from disk."""
+    def load_index(self):
+        """Load centroids only - cluster files will be loaded on-demand during retrieval."""
         c1 = np.load("indexes/ivf1_centroids.npy")
-        c2_npz = np.load("indexes/ivf2_centroids.npz")
-        centroids2 = [c2_npz[key] for key in c2_npz]
+        # Load centroids2 list from pickle
+        import pickle
+        with open("indexes/ivf2_centroids.pkl", "rb") as f:
+            centroids2 = pickle.load(f)
 
         self.twolevel = TwoLevelIVF(K1=c1.shape[0], K2=self.second_level_num_clusters, seed=DB_SEED_NUMBER)
         self.twolevel.centroids1 = c1
         self.twolevel.centroids2 = centroids2
-        self.twolevel.inverted_offsets = np.load("indexes/inverted_offsets.npy")
-        self.twolevel.inverted_ids = np.load("indexes/inverted_ids.npy", mmap_mode="r")
+        # No inverted lists - will load cluster files on demand
         return
+
+
 

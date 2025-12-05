@@ -52,9 +52,10 @@ def eval(results: List[Result]):
 
     return sum(scores) / len(scores), sum(run_time) / len(run_time)
 
+db_20_index_path = "20M_2L_INDEX"
 
 if __name__ == "__main__":
-    db = VecDB(db_size = 10**6)
+    db = VecDB(db_size = 20*10**6, index_file_path=db_20_index_path, new_db=False)
 
     all_db = db.get_all_rows()
 

@@ -2,143 +2,7 @@ from typing import List, Tuple, Dict
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 import pickle
-
-
-class InvertedFileIndex:
-    """
-    Inverted File Index (IVF) for coarse quantization.
-    """
-    
-    def __init__(self, num_clusters: int, seed: int = 42) -> None:
-        self.num_clusters = num_clusters
-        self.seed = seed
-        self.centroids: np.ndarray = None  # Shape: (num_clusters, dimension)
-        self.inverted_offsets: np.ndarray = None  # Shape: (num_clusters + 1,)
-        self.inverted_ids: np.ndarray = None  # Flat array of all vector IDs
-        
-    def fit(self, vectors: np.ndarray, batch_size: int) -> None:
-        kmeans = MiniBatchKMeans(
-            n_clusters=self.num_clusters,
-            batch_size=batch_size,
-            random_state=self.seed,
-            max_iter=100,
-            verbose=0
-        )
-        
-        num_vectors = vectors.shape[0]
-        
-        for start in range(0, num_vectors, batch_size):
-            end = min(start + batch_size, num_vectors)
-            batch = vectors[start:end].astype(np.float32)
-            kmeans.partial_fit(batch)
-        
-        self.centroids = kmeans.cluster_centers_.astype(np.float32)
-    
-    def assign(self, vectors: np.ndarray, batch_size: int) -> np.ndarray:
-        """
-        Assign vectors to their nearest cluster
-        """
-        num_vectors = vectors.shape[0]
-        assignments = np.zeros(num_vectors, dtype=np.int32)
-        
-        for start in range(0, num_vectors, batch_size):
-            end = min(start + batch_size, num_vectors)
-            batch = vectors[start:end].astype(np.float32)
-            distances = np.sum((batch[:, None, :] - self.centroids[None, :, :]) ** 2, axis=2)
-            assignments[start:end] = np.argmin(distances, axis=1)
-        
-        return assignments
-    
-    def build_inverted_lists(self, assignments: np.ndarray) -> None:
-        """Build inverted lists using numpy arrays for memory efficiency."""
-        # Count vectors per cluster
-        cluster_sizes = np.bincount(assignments, minlength=self.num_clusters)
-        
-        # Pre-allocate flat array for all IDs
-        self.inverted_ids = np.zeros(len(assignments), dtype=np.int32)
-        self.inverted_offsets = np.zeros(self.num_clusters + 1, dtype=np.int32)
-        
-        # Compute offsets (cumulative sum)
-        self.inverted_offsets[1:] = np.cumsum(cluster_sizes)
-        
-        # Fill IDs
-        current_pos = self.inverted_offsets.copy()
-        for vec_id, cluster_id in enumerate(assignments):
-            pos = current_pos[cluster_id]
-            self.inverted_ids[pos] = vec_id
-            current_pos[cluster_id] += 1
-        
-        # Report statistics
-        print(f"Inverted lists built. Min size: {cluster_sizes.min()}, "
-            f"Max size: {cluster_sizes.max()}, Avg size: {cluster_sizes.mean():.1f}")
-    
-    def search_clusters(self, query: np.ndarray, nprobe: int) -> List[int]:
-        """
-        Find the nprobe nearest clusters to the query vector.
-        """
-        query = query.astype(np.float32)
-        
-        # Compute distances to all centroids
-        distances = np.sum((self.centroids - query[None, :]) ** 2, axis=1)
-        
-        # Get nprobe nearest clusters
-        nearest_clusters = np.argsort(distances)[:nprobe]
-        
-        return nearest_clusters.tolist()
-    
-
-    def get_candidate_ids(self, cluster_ids: List[int]) -> np.ndarray:
-        """Get candidate IDs using offset-based lookup."""
-        candidates = []
-        for cluster_id in cluster_ids:
-            start = self.inverted_offsets[cluster_id]
-            end = self.inverted_offsets[cluster_id + 1]
-            candidates.append(self.inverted_ids[start:end])
-        
-        return np.concatenate(candidates) if candidates else np.array([], dtype=np.int32)
-        
-    def save(self, filepath: str = "ivf_model.pkl") -> None:
-        """
-        Save the IVF model to disk.
-        
-        Args:
-            filepath (str): Path to save the model.
-        """
-        state = {
-            'num_clusters': self.num_clusters,
-            'seed': self.seed,
-            'centroids': self.centroids,
-            'inverted_offsets': self.inverted_offsets,
-            'inverted_ids': self.inverted_ids
-        }
-        with open(filepath, 'wb') as f:
-            pickle.dump(state, f)
-        print(f"IVF model saved to {filepath}")
-    
-    @classmethod
-    def load(cls, filepath: str = "ivf_model.pkl"):
-        """
-        Load an IVF model from disk.
-        
-        Args:
-            filepath (str): Path to load the model from.
-            
-        Returns:
-            InvertedFileIndex: Loaded IVF instance.
-        """
-        with open(filepath, 'rb') as f:
-            state = pickle.load(f)
-        
-        instance = cls(
-            num_clusters=state['num_clusters'],
-            seed=state['seed']
-        )
-        instance.centroids = state['centroids']
-        instance.inverted_offsets = state['inverted_offsets']
-        instance.inverted_ids = state['inverted_ids']
-        print(f"IVF model loaded from {filepath}")
-        return instance
-
+import os
 
 class TwoLevelIVF:
     """
@@ -160,10 +24,6 @@ class TwoLevelIVF:
         self.centroids1: np.ndarray = None            # (K1, D)
         self.centroids2: List[np.ndarray] = []        # list of (k2_i, D) arrays (k2_i <= K2)
 
-        # flattened inverted lists across all K1 * K2 second-level clusters
-        self.inverted_offsets: np.ndarray = None      # shape (K1*K2 + 1,)
-        self.inverted_ids: np.ndarray = None          # flat array of vector ids
-
     def fit(self, vectors: np.ndarray, batch_size: int) -> None:
         """Train the two-level index from `vectors`.
 
@@ -180,7 +40,7 @@ class TwoLevelIVF:
             kmeans1.partial_fit(batch)
         self.centroids1 = kmeans1.cluster_centers_.astype(np.float32)
 
-        # Assign every vector to its top cluster (in batches to be memmap-friendly)
+        # Assign every vector to its top cluster
         top_assignments = np.empty(num_vectors, dtype=np.int32)
         centroid_norms = np.sum(self.centroids1 * self.centroids1, axis=1)
         for start in range(0, num_vectors, batch_size):
@@ -193,20 +53,12 @@ class TwoLevelIVF:
 
         # For each top cluster, collect its points and run KMeans to produce K2 centroids
         self.centroids2 = [None] * self.K1
-        second_level_assignments = np.empty(num_vectors, dtype=np.int32)
-
-        current_global_index = 0
-        flattened_ids_list = []
-        offsets = [0]
 
         for c in range(self.K1):
             idxs = np.nonzero(top_assignments == c)[0]
             if idxs.size == 0:
                 # empty top cluster
                 self.centroids2[c] = np.zeros((0, vectors.shape[1]), dtype=np.float32)
-                # extend offsets by K2 empty lists
-                for _ in range(self.K2):
-                    offsets.append(offsets[-1])
                 continue
 
             points = vectors[idxs].astype(np.float32)
@@ -220,34 +72,6 @@ class TwoLevelIVF:
 
             centers2 = kmeans2.cluster_centers_.astype(np.float32)
             self.centroids2[c] = centers2
-
-            # assign points to second-level clusters
-            centroid2_norms = np.sum(centers2 * centers2, axis=1)
-            dots2 = points @ centers2.T
-            batch_norms = np.sum(points * points, axis=1)
-            dists2 = batch_norms[:, None] + centroid2_norms[None, :] - 2.0 * dots2
-            sub_assign = np.argmin(dists2, axis=1)
-            second_level_assignments[idxs] = sub_assign
-
-            # Build flattened inverted lists by subcluster
-            for sub in range(k_here):
-                mask = (sub_assign == sub)
-                ids_in_sub = idxs[mask]
-                flattened_ids_list.append(ids_in_sub)
-                offsets.append(offsets[-1] + ids_in_sub.size)
-
-            # If k_here < K2, add empty subclusters for the remaining slots
-            for _ in range(self.K2 - k_here):
-                flattened_ids_list.append(np.array([], dtype=np.int32))
-                offsets.append(offsets[-1])
-
-        # concatenate flattened ids into one array
-        if flattened_ids_list:
-            self.inverted_ids = np.concatenate([arr.astype(np.int32) for arr in flattened_ids_list])
-        else:
-            self.inverted_ids = np.array([], dtype=np.int32)
-
-        self.inverted_offsets = np.array(offsets, dtype=np.int32)
 
     def assign(self, vectors: np.ndarray, batch_size: int) -> np.ndarray:
         """Assign vectors to flattened second-level cluster ids: id = top * K2 + sub.
@@ -291,40 +115,45 @@ class TwoLevelIVF:
 
         return assignments
 
-    def get_candidate_ids(self, top_sub_ids: List[int]) -> np.ndarray:
-        """Given a list (or array) of flattened second-level ids, return concatenated candidate vector ids."""
-        candidates = []
-        for fsid in top_sub_ids:
-            if fsid < 0 or fsid >= (self.K1 * self.K2):
-                continue
-            start = self.inverted_offsets[fsid]
-            end = self.inverted_offsets[fsid + 1]
-            candidates.append(self.inverted_ids[start:end])
-        return np.concatenate(candidates) if candidates else np.array([], dtype=np.int32)
-
-    def search(self, query: np.ndarray, nprobe1: int, nprobe2: int) -> np.ndarray:
-        """Search the two-level index and return concatenated candidate ids.
+    def search(self, query: np.ndarray,
+               nprobe1: int, nprobe2: int, 
+               cluster_dir: str = "indexes", 
+               centroids_1_path: str = None,
+               centroids_2_path: str = None) -> np.ndarray:
+        """Search the two-level index and return candidate ids.
+        Loads cluster files on-demand from hierarchical directory structure.
 
         - `nprobe1`: number of top-level clusters to probe
         - `nprobe2`: number of second-level subclusters to probe per top cluster
+        - `cluster_dir`: base directory containing cluster_L1_* subdirectories
         """
+        centroids1 = np.load(centroids_1_path) if centroids_1_path else self.centroids1
+        centroids_2 = pickle.load(open(centroids_2_path, "rb")) if centroids_2_path else self.centroids2
+        
         q = query.astype(np.float32)
         qnorm = np.sum(q * q)
-        centroid1_norms = np.sum(self.centroids1 * self.centroids1, axis=1)
-        dots1 = q @ self.centroids1.T
+        centroid1_norms = np.sum(centroids1 * centroids1, axis=1)
+        dots1 = q @ centroids1.T
         d1 = qnorm + centroid1_norms - 2.0 * dots1
         top_ids = np.argsort(d1)[:min(nprobe1, self.K1)]
 
-        probe_flat_ids = []
+        all_candidate_ids = []
+        
         for top in top_ids:
-            centers2 = self.centroids2[top]
+            centers2 = centroids_2[top]
             if centers2.size == 0:
                 continue
             c2_norms = np.sum(centers2 * centers2, axis=1)
             dots2 = q @ centers2.T
             d2 = qnorm + c2_norms - 2.0 * dots2
             sub_ids = np.argsort(d2)[:min(nprobe2, centers2.shape[0])]
+            del centers2
+            
+            # Load cluster files on-demand
             for sub in sub_ids:
-                probe_flat_ids.append(top * self.K2 + sub)
-
-        return self.get_candidate_ids(probe_flat_ids)
+                cluster_file = f"{cluster_dir}/cluster_L1_{top}/cluster_L2_{sub}.npy"
+                if os.path.exists(cluster_file):
+                    cluster_ids = np.load(cluster_file)
+                    all_candidate_ids.append(cluster_ids)
+            
+        return np.concatenate(all_candidate_ids) if all_candidate_ids else np.array([], dtype=np.int32)
