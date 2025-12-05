@@ -32,14 +32,27 @@ class VecDB:
         self.nprobe = nprobe              
         self.batch_size = batch_size
         self.S_ivf = S_ivf
+        # check which number does db_path contain 
+        if self.db_path is not None and "1M" in self.db_path:
+            self.M = 16
+            self.num_clusters = 1024
+            self.nprobe = 64
+        elif self.db_path is not None and "10M" in self.db_path:
+            self.M = 4
+            self.num_clusters = 4096
+            self.nprobe = 64
+        elif self.db_path is not None and "20M" in self.db_path:
+            self.M = 4
+            self.num_clusters = 16384
+            self.nprobe = 128
         
-        if index_file_path is not None and os.path.exists(index_file_path):
-            metadata_file_path = os.path.join(index_file_path, f"{self.db_path.split('_emb_')[0]}_metadata.npy")
+        # if index_file_path is not None and os.path.exists(index_file_path):
+        #     metadata_file_path = os.path.join(index_file_path, f"{self.db_path.split('_emb_')[0]}_metadata.npy")
             
-            if os.path.exists(metadata_file_path):
-                metadata = np.load(metadata_file_path)
-                self.M, self.Ks, self.num_clusters, self.nprobe = metadata
-                print(f"Loaded index metadata: M={self.M}, Ks={self.Ks}, num_clusters={self.num_clusters}, nprobe={self.nprobe}")
+        #     if os.path.exists(metadata_file_path):
+        #         metadata = np.load(metadata_file_path)
+        #         self.M, self.Ks, self.num_clusters, self.nprobe = metadata
+        #         print(f"Loaded index metadata: M={self.M}, Ks={self.Ks}, num_clusters={self.num_clusters}, nprobe={self.nprobe}")
 
         self.pq: ProductQuantizer = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)  
         self.opq: OPQPreprocessor = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)  
