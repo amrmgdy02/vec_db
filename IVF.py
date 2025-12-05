@@ -2,6 +2,7 @@ from typing import List, Tuple, Dict
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 import pickle
+import os
 
 
 class InvertedFileIndex:
@@ -15,6 +16,7 @@ class InvertedFileIndex:
         self.centroids: np.ndarray = None  # Shape: (num_clusters, dimension)
         self.inverted_offsets: np.ndarray = None  # Shape: (num_clusters + 1,)
         self.inverted_ids: np.ndarray = None  # Flat array of all vector IDs
+        self.cluster_dir: str = None  # Directory for per-cluster files (optional)
         
     def fit(self, vectors: np.ndarray, batch_size: int) -> None:
         #train IVF using k-means
@@ -119,28 +121,17 @@ class InvertedFileIndex:
 
     def get_candidate_ids(self, cluster_ids: List[int]) -> np.ndarray:
         """
-        Get candidate IDs using offset-based lookup.
-        Memory-efficient: pre-allocates result array instead of concatenating.
+        Get candidate IDs using offset-based lookup or per-cluster files.
+        Memory-efficient: loads only requested clusters.
         """
-        
-        total_size = sum(
-            self.inverted_offsets[cid + 1] - self.inverted_offsets[cid] 
-            for cid in cluster_ids
-        )
-        
-        if total_size == 0:
-            return np.array([], dtype=np.int32)
-        
-        result = np.empty(total_size, dtype=np.int32)
-        
-        current_pos = 0
+        candidates = []
         for cluster_id in cluster_ids:
-            start = self.inverted_offsets[cluster_id]
-            end = self.inverted_offsets[cluster_id + 1]
-            size = end - start
-            if size > 0:
-                result[current_pos:current_pos + size] = self.inverted_ids[start:end]
-                current_pos += size
+            cluster_file = f"{self.cluster_dir}/cluster_{cluster_id}.npy"
+            if os.path.exists(cluster_file):
+                cluster_data = np.load(cluster_file)
+                candidates.append(cluster_data)
+                # close cluster_data to free memory
+                del cluster_data
+            
+        return np.concatenate(candidates) if candidates else np.array([], dtype=np.int32)
         
-        return result
-
