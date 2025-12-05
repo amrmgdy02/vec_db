@@ -113,7 +113,16 @@ class VecDB:
             print("Warning: No candidates found in IVF search")
             return []
         
-        candidate_codes = self.pq_codes[candidate_ids]
+        candidate_codes_list = []
+        for cid in cluster_ids:
+            start = self.ivf.inverted_offsets[cid]
+            end = self.ivf.inverted_offsets[cid+1]
+            
+            # This reads a continuous block from disk
+            candidate_codes_list.append(self.pq_codes[start:end])
+
+        candidate_codes = np.concatenate(candidate_codes_list)
+        
         query_rotated = self.opq.transform(query.reshape(1, -1)).flatten()
         distances = adc_distance(query_rotated, candidate_codes, self.pq)
     
@@ -274,6 +283,41 @@ class VecDB:
                 self.pq_codes[start:end] = codes_batch
                 
             self.pq_codes.flush()
+
+            print("Re-arranging PQ codes to match IVF clusters...")
+
+            # 1. Create a READ-ONLY view of the unsorted codes you just wrote
+            unsorted_codes = np.memmap(
+                os.path.join(self.index_path, f"{db_size_str}_pq_codes.dat"), 
+                dtype=np.uint8, mode='r', shape=(num_records, self.M)
+            )
+
+            # 2. Create a new file for SORTED codes
+            sorted_codes_path = os.path.join(self.index_path, f"{db_size_str}_pq_codes_sorted.dat")
+            sorted_codes = np.memmap(
+                sorted_codes_path, 
+                dtype=np.uint8, mode='w+', shape=(num_records, self.M)
+            )
+
+            # 3. Write codes in the order of inverted_ids
+            # Doing this in batches to respect RAM
+            batch_size = 100_000 # Adjust based on M
+            for i in range(0, num_records, batch_size):
+                # Get a batch of the SORTED IDs (which represent the cluster order)
+                batch_ids = self.ivf.inverted_ids[i : i + batch_size]
+                
+                # Read those specific codes using fancy indexing (This is slow, but we only do it once!)
+                # Ideally, you'd do this smarter, but for building, this works.
+                sorted_codes[i : i + batch_size] = unsorted_codes[batch_ids]
+
+            sorted_codes.flush()
+
+            # 4. Point self.pq_codes to this new sorted file for the rest of the runtime
+            self.pq_codes = sorted_codes
+
+            # remove the unsorted codes file and rename the sorted one
+            os.remove(os.path.join(self.index_path, f"{db_size_str}_pq_codes.dat"))
+            os.rename(sorted_codes_path, os.path.join(self.index_path, f"{db_size_str}_pq_codes.dat"))
             
             print("Index saved to disk.")
 
