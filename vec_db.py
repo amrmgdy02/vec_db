@@ -16,7 +16,7 @@ class VecDB:
                  use_pq=True, 
                  new_db = True, 
                  db_size = None, 
-                 M=16, 
+                 M=8, 
                  Ks=256, 
                  num_clusters=16384, 
                  nprobe=128, 
@@ -32,11 +32,19 @@ class VecDB:
         self.nprobe = nprobe              
         self.batch_size = batch_size
         self.S_ivf = S_ivf
+        
+        if index_file_path is not None and os.path.exists(index_file_path):
+            metadata_file_path = os.path.join(index_file_path, f"{self.db_path.split('_emb_')[0]}_metadata.npy")
+            
+            if os.path.exists(metadata_file_path):
+                metadata = np.load(metadata_file_path)
+                self.M, self.Ks, self.num_clusters, self.nprobe = metadata
+                print(f"Loaded index metadata: M={self.M}, Ks={self.Ks}, num_clusters={self.num_clusters}, nprobe={self.nprobe}")
 
-        self.pq: ProductQuantizer = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # PQ object
-        self.opq: OPQPreprocessor = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # OPQ object
-        self.ivf: InvertedFileIndex = InvertedFileIndex(num_clusters=self.num_clusters, seed=DB_SEED_NUMBER)     # IVF object
-        self.pq_codes: np.memmap = None        # PQ codes stored on disk
+        self.pq: ProductQuantizer = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)  
+        self.opq: OPQPreprocessor = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)  
+        self.ivf: InvertedFileIndex = InvertedFileIndex(num_clusters=self.num_clusters, seed=DB_SEED_NUMBER)
+        self.pq_codes: np.memmap = None        
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -263,6 +271,9 @@ class VecDB:
             
             self.pq_codes = np.memmap(f"{self.index_path}/{db_size_str}_pq_codes.dat", dtype=np.uint8, mode='w+', shape=(num_records, self.M))
             
+            metadata = np.array([self.M, self.Ks, self.num_clusters, self.nprobe], dtype=np.int32)
+            np.save(os.path.join(self.index_path, f"{db_size_str}_metadata.npy"), metadata)
+            
             for start in range(0, num_records, self.batch_size):
                 end = min(start + self.batch_size, num_records)
                 batch_vectors = vectors[start:end]
@@ -286,6 +297,10 @@ class VecDB:
         self.ivf.centroids = np.load(f"{self.index_path}/{db_size_str}_ivf_centroids.npy")
         self.ivf.inverted_offsets = np.load(f"{self.index_path}/{db_size_str}_inverted_offsets.npy")
         self.ivf.inverted_ids = np.load(f"{self.index_path}/{db_size_str}_inverted_ids.npy", mmap_mode="r")
+        
+        # metadata = np.load(os.path.join(self.index_path, f"{db_size_str}_metadata.npy"))
+        # self.M, self.Ks, self.num_clusters, self.nprobe = metadata
+        # Loaded in init
         
         if use_pq:
             num_records = self._get_num_records()
