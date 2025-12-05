@@ -98,66 +98,49 @@ class InvertedFileIndex:
     def search_clusters(self, query: np.ndarray, nprobe: int) -> List[int]:
         """
         Find the nprobe nearest clusters to the query vector.
+        Memory-efficient: uses dot product formula to avoid (K, D) temporary array.
         """
         query = query.astype(np.float32)
         
-        # Compute distances to all centroids
-        distances = np.sum((self.centroids - query[None, :]) ** 2, axis=1)
+        # dot product formula: ||x-c||^2 = ||x||^2 + ||c||^2 - 2*x·c
+        #query_norm_sq = np.dot(query, query)
+        centroid_norms_sq = np.sum(self.centroids ** 2, axis=1)
+        dot_products = np.dot(self.centroids, query)
         
-        # Get nprobe nearest clusters
-        nearest_clusters = np.argsort(distances)[:nprobe]
+        distances = centroid_norms_sq - 2 * dot_products
+        
+        if nprobe < len(distances):
+            nearest_clusters = np.argpartition(distances, nprobe)[:nprobe]
+        else:
+            nearest_clusters = np.arange(len(distances))
         
         return nearest_clusters.tolist()
     
 
     def get_candidate_ids(self, cluster_ids: List[int]) -> np.ndarray:
-        """Get candidate IDs using offset-based lookup."""
-        candidates = []
+        """
+        Get candidate IDs using offset-based lookup.
+        Memory-efficient: pre-allocates result array instead of concatenating.
+        """
+        
+        total_size = sum(
+            self.inverted_offsets[cid + 1] - self.inverted_offsets[cid] 
+            for cid in cluster_ids
+        )
+        
+        if total_size == 0:
+            return np.array([], dtype=np.int32)
+        
+        result = np.empty(total_size, dtype=np.int32)
+        
+        current_pos = 0
         for cluster_id in cluster_ids:
             start = self.inverted_offsets[cluster_id]
             end = self.inverted_offsets[cluster_id + 1]
-            candidates.append(self.inverted_ids[start:end])
+            size = end - start
+            if size > 0:
+                result[current_pos:current_pos + size] = self.inverted_ids[start:end]
+                current_pos += size
         
-        return np.concatenate(candidates) if candidates else np.array([], dtype=np.int32)
-        
-    def save(self, filepath: str = "ivf_model.pkl") -> None:
-        """
-        Save the IVF model to disk.
-        
-        Args:
-            filepath (str): Path to save the model.
-        """
-        state = {
-            'num_clusters': self.num_clusters,
-            'seed': self.seed,
-            'centroids': self.centroids,
-            'inverted_offsets': self.inverted_offsets,
-            'inverted_ids': self.inverted_ids
-        }
-        with open(filepath, 'wb') as f:
-            pickle.dump(state, f)
-        print(f"IVF model saved to {filepath}")
-    
-    @classmethod
-    def load(cls, filepath: str = "ivf_model.pkl"):
-        """
-        Load an IVF model from disk.
-        
-        Args:
-            filepath (str): Path to load the model from.
-            
-        Returns:
-            InvertedFileIndex: Loaded IVF instance.
-        """
-        with open(filepath, 'rb') as f:
-            state = pickle.load(f)
-        
-        instance = cls(
-            num_clusters=state['num_clusters'],
-            seed=state['seed']
-        )
-        instance.centroids = state['centroids']
-        instance.inverted_offsets = state['inverted_offsets']
-        instance.inverted_ids = state['inverted_ids']
-        print(f"IVF model loaded from {filepath}")
-        return instance
+        return result
+

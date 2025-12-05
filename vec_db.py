@@ -147,20 +147,18 @@ class VecDB:
         # Map back to global IDs
         result_ids = [candidate_ids[i] for i in shortlist_indices]
 
-        # -------------------------------------------------------------
         # Re-Ranking
-        # -------------------------------------------------------------
         if len(result_ids) == 0:
             return []
 
         raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
                            shape=(self._get_num_records(), DIMENSION))
-        shortlist_vectors = np.zeros((len(result_ids), DIMENSION), dtype=np.float32)
-        sorted_ids = sorted(result_ids)
         
-        for i, vector_id in enumerate(sorted_ids):
-            shortlist_vectors[i] = raw_db[vector_id]
-    
+        sorted_ids = np.array(sorted(result_ids))
+        
+        # Read in one chunk (shortlist is small, ~500 vectors max)
+        shortlist_vectors = np.array(raw_db[sorted_ids])
+        
         norms = np.linalg.norm(shortlist_vectors, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         shortlist_vectors /= norms
@@ -170,17 +168,18 @@ class VecDB:
         final_pairs = list(zip(sorted_ids, exact_scores))
         final_pairs.sort(key=lambda x: x[1], reverse=True)
         
-        final_top_k_ids = [p[0] for p in final_pairs[:top_k]]
+        final_top_k_ids = [int(p[0]) for p in final_pairs[:top_k]]
         return final_top_k_ids
     
-    def retrieve_without_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
+    def retrieve_without_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5, chunk_size=10000):
         """
         Retrieve top_k most similar vectors using IVF without PQ (brute-force within clusters).
+        Memory-efficient: processes candidates in chunks instead of loading all into RAM.
         
         Search algorithm:
         1. Find nprobe nearest IVF clusters
         2. Get candidate vector IDs from those clusters
-        3. Compute exact distances to candidates
+        3. Compute exact distances to candidates in chunks
         4. Return top_k nearest vectors
         """
         
@@ -199,17 +198,33 @@ class VecDB:
         candidate_ids = np.asarray(candidate_ids, dtype=np.int64)
 
         db_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
-        candidate_vectors = np.asarray(db_vectors[candidate_ids])
-
-        distances = np.array([self._cal_score(query, vec) for vec in candidate_vectors])
         
-        if len(candidate_ids) < top_k:
-            top_k_indices = np.argsort(-distances)
-        else:
-            top_k_indices = np.argpartition(-distances, top_k)[:top_k]
-            top_k_indices = top_k_indices[np.argsort(-distances[top_k_indices])]
+        sort_indices = np.argsort(candidate_ids)
+        sorted_candidate_ids = candidate_ids[sort_indices]
         
-        result_ids = [candidate_ids[i] for i in top_k_indices]
+        import heapq
+        top_k_heap = []
+        
+        for chunk_start in range(0, len(sorted_candidate_ids), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(sorted_candidate_ids))
+            chunk_ids = sorted_candidate_ids[chunk_start:chunk_end]
+            
+            chunk_vectors = np.array(db_vectors[chunk_ids])
+            
+            chunk_norms = np.linalg.norm(chunk_vectors, axis=1, keepdims=True)
+            chunk_norms[chunk_norms == 0] = 1.0
+            chunk_vectors_normalized = chunk_vectors / chunk_norms
+            chunk_scores = np.dot(chunk_vectors_normalized, query)
+            
+            for local_idx, score in enumerate(chunk_scores):
+                original_idx = sort_indices[chunk_start + local_idx]
+                if len(top_k_heap) < top_k:
+                    heapq.heappush(top_k_heap, (score, original_idx))
+                elif score > top_k_heap[0][0]:
+                    heapq.heapreplace(top_k_heap, (score, original_idx))
+        
+        top_k_heap.sort(reverse=True)
+        result_ids = [candidate_ids[idx] for _, idx in top_k_heap]
         
         return result_ids
     
