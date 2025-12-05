@@ -153,9 +153,6 @@ class VecDB:
         sorted_ids = sorted(result_ids)
         
         # Initialize the memory map (Zero RAM cost until accessed)
-        raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
-                        shape=(self._get_num_records(), DIMENSION))
-        
         final_pairs = []
         
         # Loop through ALL sorted_ids (no need for batching logic anymore, we do it per vector)
