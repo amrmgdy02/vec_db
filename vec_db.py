@@ -161,7 +161,8 @@ class VecDB:
         with open(self.db_path, "rb") as f:
             for idx in sorted_ids:
                 # 1. Jump directly to the vector's location on disk
-                f.seek(idx * VECTOR_BYTE_SIZE)
+                offset = int(idx) * VECTOR_BYTE_SIZE
+                f.seek(offset)
                 
                 # 2. Read exactly 256 bytes (for 64 dims)
                 bytes_data = f.read(VECTOR_BYTE_SIZE)
