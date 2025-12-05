@@ -32,11 +32,32 @@ class VecDB:
         self.nprobe = nprobe              
         self.batch_size = batch_size
         self.S_ivf = S_ivf
+        # check which number does db_path contain 
+        if self.db_path is not None and "1M" in self.db_path:
+            self.M = 16
+            self.num_clusters = 1024
+            self.nprobe = 64
+        elif self.db_path is not None and "10M" in self.db_path:
+            self.M = 4
+            self.num_clusters = 4096
+            self.nprobe = 64
+        elif self.db_path is not None and "20M" in self.db_path:
+            self.M = 4
+            self.num_clusters = 16384
+            self.nprobe = 128
+        
+        # if index_file_path is not None and os.path.exists(index_file_path):
+        #     metadata_file_path = os.path.join(index_file_path, f"{self.db_path.split('_emb_')[0]}_metadata.npy")
+            
+        #     if os.path.exists(metadata_file_path):
+        #         metadata = np.load(metadata_file_path)
+        #         self.M, self.Ks, self.num_clusters, self.nprobe = metadata
+        #         print(f"Loaded index metadata: M={self.M}, Ks={self.Ks}, num_clusters={self.num_clusters}, nprobe={self.nprobe}")
 
-        self.pq: ProductQuantizer = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # PQ object
-        self.opq: OPQPreprocessor = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)       # OPQ object
-        self.ivf: InvertedFileIndex = InvertedFileIndex(num_clusters=self.num_clusters, seed=DB_SEED_NUMBER)     # IVF object
-        self.pq_codes: np.memmap = None        # PQ codes stored on disk
+        self.pq: ProductQuantizer = ProductQuantizer(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)  
+        self.opq: OPQPreprocessor = OPQPreprocessor(num_subvectors=self.M, num_centroids=self.Ks, seed=DB_SEED_NUMBER)  
+        self.ivf: InvertedFileIndex = InvertedFileIndex(num_clusters=self.num_clusters, seed=DB_SEED_NUMBER)
+        self.pq_codes: np.memmap = None        
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -135,20 +156,18 @@ class VecDB:
         # Map back to global IDs
         result_ids = [candidate_ids[i] for i in shortlist_indices]
 
-        # -------------------------------------------------------------
         # Re-Ranking
-        # -------------------------------------------------------------
         if len(result_ids) == 0:
             return []
 
         raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
                            shape=(self._get_num_records(), DIMENSION))
-        shortlist_vectors = np.zeros((len(result_ids), DIMENSION), dtype=np.float32)
-        sorted_ids = sorted(result_ids)
         
-        for i, vector_id in enumerate(sorted_ids):
-            shortlist_vectors[i] = raw_db[vector_id]
-    
+        sorted_ids = np.array(sorted(result_ids))
+        
+        # Read in one chunk (shortlist is small, ~500 vectors max)
+        shortlist_vectors = np.array(raw_db[sorted_ids])
+        
         norms = np.linalg.norm(shortlist_vectors, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         shortlist_vectors /= norms
@@ -158,17 +177,18 @@ class VecDB:
         final_pairs = list(zip(sorted_ids, exact_scores))
         final_pairs.sort(key=lambda x: x[1], reverse=True)
         
-        final_top_k_ids = [p[0] for p in final_pairs[:top_k]]
+        final_top_k_ids = [int(p[0]) for p in final_pairs[:top_k]]
         return final_top_k_ids
     
-    def retrieve_without_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5):
+    def retrieve_without_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k = 5, chunk_size=10000):
         """
         Retrieve top_k most similar vectors using IVF without PQ (brute-force within clusters).
+        Memory-efficient: processes candidates in chunks instead of loading all into RAM.
         
         Search algorithm:
         1. Find nprobe nearest IVF clusters
         2. Get candidate vector IDs from those clusters
-        3. Compute exact distances to candidates
+        3. Compute exact distances to candidates in chunks
         4. Return top_k nearest vectors
         """
         
@@ -187,17 +207,33 @@ class VecDB:
         candidate_ids = np.asarray(candidate_ids, dtype=np.int64)
 
         db_vectors = np.memmap(self.db_path, dtype=np.float32, mode='r', shape=(num_records, DIMENSION))
-        candidate_vectors = np.asarray(db_vectors[candidate_ids])
-
-        distances = np.array([self._cal_score(query, vec) for vec in candidate_vectors])
         
-        if len(candidate_ids) < top_k:
-            top_k_indices = np.argsort(-distances)
-        else:
-            top_k_indices = np.argpartition(-distances, top_k)[:top_k]
-            top_k_indices = top_k_indices[np.argsort(-distances[top_k_indices])]
+        sort_indices = np.argsort(candidate_ids)
+        sorted_candidate_ids = candidate_ids[sort_indices]
         
-        result_ids = [candidate_ids[i] for i in top_k_indices]
+        import heapq
+        top_k_heap = []
+        
+        for chunk_start in range(0, len(sorted_candidate_ids), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(sorted_candidate_ids))
+            chunk_ids = sorted_candidate_ids[chunk_start:chunk_end]
+            
+            chunk_vectors = np.array(db_vectors[chunk_ids])
+            
+            chunk_norms = np.linalg.norm(chunk_vectors, axis=1, keepdims=True)
+            chunk_norms[chunk_norms == 0] = 1.0
+            chunk_vectors_normalized = chunk_vectors / chunk_norms
+            chunk_scores = np.dot(chunk_vectors_normalized, query)
+            
+            for local_idx, score in enumerate(chunk_scores):
+                original_idx = sort_indices[chunk_start + local_idx]
+                if len(top_k_heap) < top_k:
+                    heapq.heappush(top_k_heap, (score, original_idx))
+                elif score > top_k_heap[0][0]:
+                    heapq.heapreplace(top_k_heap, (score, original_idx))
+        
+        top_k_heap.sort(reverse=True)
+        result_ids = [candidate_ids[idx] for _, idx in top_k_heap]
         
         return result_ids
     
@@ -264,16 +300,16 @@ class VecDB:
             self.pq.fit(pq_train_data, batch_size=self.batch_size)
     
             print("Saving index to disk...")
-            # ensure index directory exists before writing files
-            os.makedirs(self.index_path, exist_ok=True)
-
-            np.save(os.path.join(self.index_path, f"{db_size_str}_ivf_centroids.npy"), self.ivf.centroids.astype(np.float32), allow_pickle=False)
-            np.save(os.path.join(self.index_path, f"{db_size_str}_inverted_ids.npy"), self.ivf.inverted_ids.astype(np.int32))
-            np.save(os.path.join(self.index_path, f"{db_size_str}_inverted_offsets.npy"), self.ivf.inverted_offsets.astype(np.int32))
-            np.save(os.path.join(self.index_path, f"{db_size_str}_opq_rotation.npy"), self.opq.R)
-            np.save(os.path.join(self.index_path, f"{db_size_str}_pq_codebooks.npy"), self.pq.codebooks)
-
-            self.pq_codes = np.memmap(os.path.join(self.index_path, f"{db_size_str}_pq_codes.dat"), dtype=np.uint8, mode='w+', shape=(num_records, self.M))
+            np.save(f"{self.index_path}/{db_size_str}_ivf_centroids.npy", self.ivf.centroids.astype(np.float32), allow_pickle=False)
+            np.save(f"{self.index_path}/{db_size_str}_inverted_ids.npy", self.ivf.inverted_ids.astype(np.int32))
+            np.save(f"{self.index_path}/{db_size_str}_inverted_offsets.npy", self.ivf.inverted_offsets.astype(np.int32))
+            np.save(f"{self.index_path}/{db_size_str}_opq_rotation.npy", self.opq.R)
+            np.save(f"{self.index_path}/{db_size_str}_pq_codebooks.npy", self.pq.codebooks)
+            
+            self.pq_codes = np.memmap(f"{self.index_path}/{db_size_str}_pq_codes.dat", dtype=np.uint8, mode='w+', shape=(num_records, self.M))
+            
+            metadata = np.array([self.M, self.Ks, self.num_clusters, self.nprobe], dtype=np.int32)
+            np.save(os.path.join(self.index_path, f"{db_size_str}_metadata.npy"), metadata)
             
             for start in range(0, num_records, self.batch_size):
                 end = min(start + self.batch_size, num_records)
@@ -330,13 +366,17 @@ class VecDB:
         """
         
         db_size_str = self.db_path.split("_emb_")[0]  
-        self.ivf.centroids = np.load(os.path.join(self.index_path, f"{db_size_str}_ivf_centroids.npy"))
-        self.ivf.inverted_offsets = np.load(os.path.join(self.index_path, f"{db_size_str}_inverted_offsets.npy"))
-        self.ivf.inverted_ids = np.load(os.path.join(self.index_path, f"{db_size_str}_inverted_ids.npy"), mmap_mode="r")
+        self.ivf.centroids = np.load(f"{self.index_path}/{db_size_str}_ivf_centroids.npy")
+        self.ivf.inverted_offsets = np.load(f"{self.index_path}/{db_size_str}_inverted_offsets.npy")
+        self.ivf.inverted_ids = np.load(f"{self.index_path}/{db_size_str}_inverted_ids.npy", mmap_mode="r")
+        
+        # metadata = np.load(os.path.join(self.index_path, f"{db_size_str}_metadata.npy"))
+        # self.M, self.Ks, self.num_clusters, self.nprobe = metadata
+        # Loaded in init
         
         if use_pq:
             num_records = self._get_num_records()
-            self.opq.R = np.load(os.path.join(self.index_path, f"{db_size_str}_opq_rotation.npy"))
-            self.pq.codebooks = np.load(os.path.join(self.index_path, f"{db_size_str}_pq_codebooks.npy"))
-            self.pq_codes = np.memmap(os.path.join(self.index_path, f"{db_size_str}_pq_codes.dat"), dtype=np.uint8, mode='r', shape=(num_records, self.M))
+            self.opq.R = np.load(f"{self.index_path}/{db_size_str}_opq_rotation.npy")
+            self.pq.codebooks = np.load(f"{self.index_path}/{db_size_str}_pq_codebooks.npy")
+            self.pq_codes = np.memmap(f"{self.index_path}/{db_size_str}_pq_codes.dat", dtype=np.uint8, mode='r', shape=(num_records, self.M))
 

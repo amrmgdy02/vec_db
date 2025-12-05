@@ -113,15 +113,17 @@ def eval():
     query3 = rng.random((1, DIMENSION), dtype=np.float32)
     query_dummy = rng.random((1, DIMENSION), dtype=np.float32)
 
-    db = VecDB(database_file_path="20M_emb_64.dat", new_db=False)
+    db = VecDB(database_file_path="OpenSubtitles_en_20M_emb_64.dat", new_db=False)
 
     vectors = db.get_all_rows()
 
-    actual_sorted_ids_20m_q1 = np.argsort(vectors.dot(query1.T).T / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query1)), axis= 1).squeeze().tolist()[::-1][:needed_top_k]
+    # Add epsilon to avoid division by zero
+    eps = 1e-10
+    actual_sorted_ids_20m_q1 = np.argsort(vectors.dot(query1.T).T / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query1) + eps), axis= 1).squeeze().tolist()[::-1][:needed_top_k]
     gc.collect()
-    actual_sorted_ids_20m_q2 = np.argsort(vectors.dot(query2.T).T / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query2)), axis= 1).squeeze().tolist()[::-1][:needed_top_k]
+    actual_sorted_ids_20m_q2 = np.argsort(vectors.dot(query2.T).T / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query2) + eps), axis= 1).squeeze().tolist()[::-1][:needed_top_k]
     gc.collect()
-    actual_sorted_ids_20m_q3 = np.argsort(vectors.dot(query3.T).T / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query3)), axis= 1).squeeze().tolist()[::-1][:needed_top_k]
+    actual_sorted_ids_20m_q3 = np.argsort(vectors.dot(query3.T).T / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query3) + eps), axis= 1).squeeze().tolist()[::-1][:needed_top_k]
     gc.collect()
 
     queries = [query1, query2, query3]
@@ -135,31 +137,31 @@ def eval():
 
     database_info = {
         "1M": {
-            "database_file_path": "1M_emb_64.dat",
-            "index_file_path": "1M_index_64.dat",
+            "database_file_path": "OpenSubtitles_en_1M_emb_64.dat",
+            "index_file_path": "OpenSubtitles_en_1M_index_64",
             "size": 10**6,
-            "M": 16,      # <--- Crucial: 1M uses M=16
+            #"M": 16,     
             "nprobe": 64
         },
         "10M": {
-            "database_file_path": "10M_emb_64.dat",
-            "index_file_path": "10M_index_64.dat",
+            "database_file_path": "OpenSubtitles_en_10M_emb_64.dat",
+            "index_file_path": "OpenSubtitles_en_10M_index_64",
             "size": 10 * 10**6,
-            "M": 4,       # <--- Others use M=8
+            #"M": 16,      
             "nprobe": 64
         },
-        "15M": {
-            "database_file_path": "15M_emb_64.dat",
-            "index_file_path": "15M_index_64.dat",
-            "size": 15 * 10**6,
-            "M": 4,
-            "nprobe": 64
-        },
+        # "15M": {
+        #     "database_file_path": "OpenSubtitles_en_15M_emb_64.dat",
+        #     "index_file_path": "OpenSubtitles_en_15M_index_64",
+        #     "size": 15 * 10**6,
+        #     "M": 4,
+        #     "nprobe": 64
+        # },
         "20M": {
-            "database_file_path": "20M_emb_64.dat",
-            "index_file_path": "20M_index_64.dat",
+            "database_file_path": "OpenSubtitles_en_20M_emb_64.dat",
+            "index_file_path": "OpenSubtitles_en_20M_index_64",
             "size": 20 * 10**6,
-            "M": 4,
+            #"M": 16, 
             "nprobe": 128
         }
     }
@@ -170,8 +172,8 @@ def eval():
             database_file_path=info["database_file_path"], 
             index_file_path=info["index_file_path"], 
             new_db=False,
-            M=info["M"],           # <--- Pass M so query slicing is correct
-            nprobe=info["nprobe"]  # <--- Pass nprobe for consistent recall
+            #M=info["M"], 
+            nprobe=info["nprobe"]  # Pass nprobe for consistent recall
         )
         
         actual_ids = get_actual_ids_first_k(actual_sorted_ids_20m, info["size"])
@@ -192,28 +194,28 @@ def eval():
 
 def build_indices():
     database_files = {
-            "1M_emb_64.dat": {
+            "OpenSubtitles_en_1M_emb_64.dat": {
                 "M": 16,
                 "Ks": 256,
                 "nprobe": 64,
                 "n_clusters": 1024,
                 "S_ivf": 131_072
             }, 
-            "10M_emb_64.dat": {
-                "M": 4,
-                "Ks": 256,
-                "nprobe": 64,
-                "n_clusters": 4096,
-                "S_ivf": 262_144
-            }, 
-            "15M_emb_64.dat": {
-                "M": 4,
-                "Ks": 256,
-                "nprobe": 64,
-                "n_clusters": 8192,
-                "S_ivf": 393_216
-            }, 
-            "20M_emb_64.dat": {
+            # "OpenSubtitles_en_10M_emb_64.dat": {
+            #     "M": 4,
+            #     "Ks": 256,
+            #     "nprobe": 64,
+            #     "n_clusters": 4096,
+            #     "S_ivf": 262_144
+            # }, 
+            # "OpenSubtitles_en_15M_emb_64.dat": {
+            #     "M": 4,
+            #     "Ks": 256,
+            #     "nprobe": 64,
+            #     "n_clusters": 8192,
+            #     "S_ivf": 393_216
+            # }, 
+            "OpenSubtitles_en_20M_emb_64.dat": {
                 "M": 4,
                 "Ks": 256,
                 "nprobe": 128,
@@ -222,7 +224,7 @@ def build_indices():
             }
         }
     for db_file in database_files:
-        index_file = db_file.replace("_emb_", "_index_")
+        index_file = db_file.replace("_emb_", "_index_").replace(".dat", "")
         db = VecDB(database_file_path=db_file, index_file_path=index_file, new_db=False, 
                    M=database_files[db_file]["M"],
                    Ks=database_files[db_file]["Ks"],
@@ -297,5 +299,5 @@ def generate_dbs():
 
 if __name__ == "__main__":
     # generate_dbs()
-    # build_indices()
+    #build_indices()
     eval()
