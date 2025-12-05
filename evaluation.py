@@ -143,13 +143,13 @@ def eval():
             #"M": 16,     
             "nprobe": 64
         },
-        "10M": {
-            "database_file_path": "OpenSubtitles_en_10M_emb_64.dat",
-            "index_file_path": "OpenSubtitles_en_10M_index_64",
-            "size": 10 * 10**6,
-            #"M": 16,      
-            "nprobe": 64
-        },
+        # "10M": {
+        #     "database_file_path": "OpenSubtitles_en_10M_emb_64.dat",
+        #     "index_file_path": "OpenSubtitles_en_10M_index_64",
+        #     "size": 10 * 10**6,
+        #     #"M": 16,      
+        #     "nprobe": 64
+        # },
         # "15M": {
         #     "database_file_path": "OpenSubtitles_en_15M_emb_64.dat",
         #     "index_file_path": "OpenSubtitles_en_15M_index_64",
@@ -157,13 +157,13 @@ def eval():
         #     "M": 4,
         #     "nprobe": 64
         # },
-        "20M": {
-            "database_file_path": "OpenSubtitles_en_20M_emb_64.dat",
-            "index_file_path": "OpenSubtitles_en_20M_index_64",
-            "size": 20 * 10**6,
-            #"M": 16, 
-            "nprobe": 128
-        }
+        # "20M": {
+        #     "database_file_path": "OpenSubtitles_en_20M_emb_64.dat",
+        #     "index_file_path": "OpenSubtitles_en_20M_index_64",
+        #     "size": 20 * 10**6,
+        #     #"M": 16, 
+        #     "nprobe": 128
+        # }
     }
 
     for db_name, info in database_info.items():
@@ -215,13 +215,13 @@ def build_indices():
             #     "n_clusters": 8192,
             #     "S_ivf": 393_216
             # }, 
-            "OpenSubtitles_en_20M_emb_64.dat": {
-                "M": 4,
-                "Ks": 256,
-                "nprobe": 128,
-                "n_clusters": 16384,
-                "S_ivf": 655_360
-            }
+            # "OpenSubtitles_en_20M_emb_64.dat": {
+            #     "M": 4,
+            #     "Ks": 256,
+            #     "nprobe": 128,
+            #     "n_clusters": 16384,
+            #     "S_ivf": 655_360
+            # }
         }
     for db_file in database_files:
         index_file = db_file.replace("_emb_", "_index_").replace(".dat", "")
@@ -299,5 +299,5 @@ def generate_dbs():
 
 if __name__ == "__main__":
     # generate_dbs()
-    #build_indices()
+    # build_indices()
     eval()

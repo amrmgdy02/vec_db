@@ -147,25 +147,41 @@ class VecDB:
         # Map back to global IDs
         result_ids = [candidate_ids[i] for i in shortlist_indices]
 
-        # Re-Ranking
         if len(result_ids) == 0:
             return []
-
-        raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
-                           shape=(self._get_num_records(), DIMENSION))
-        
+        # Sort IDs to ensure sequential disk access (faster I/O)
         sorted_ids = np.array(sorted(result_ids))
         
-        # Read in one chunk (shortlist is small, ~500 vectors max)
-        shortlist_vectors = np.array(raw_db[sorted_ids])
+        # Initialize the memory map (Zero RAM cost until accessed)
+        raw_db = np.memmap(self.db_path, dtype=np.float32, mode='r', 
+                        shape=(self._get_num_records(), DIMENSION))
         
-        norms = np.linalg.norm(shortlist_vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        shortlist_vectors /= norms
-        
-        exact_scores = np.dot(shortlist_vectors, query)
-        
-        final_pairs = list(zip(sorted_ids, exact_scores))
+        final_pairs = []
+        BATCH_SIZE = 3  # Process 3 vectors at a time
+
+        # Loop through the candidates in batches
+        for i in range(0, len(sorted_ids), BATCH_SIZE):
+            # 1. Get the IDs for this batch
+            batch_ids = sorted_ids[i : i + BATCH_SIZE]
+            
+            # 2. Load Vectors from disk
+            batch_vectors = np.array(raw_db[batch_ids])
+            
+            # 3. Normalize (if your DB isn't pre-normalized)
+            norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            batch_vectors /= norms
+
+            # 4. Compute Scores
+            batch_scores = np.dot(batch_vectors, query)
+            
+            # 5. Store results and immediately free 'batch_vectors'
+            final_pairs.extend(zip(batch_ids, batch_scores))
+            
+            # Explicit delete to be safe
+            del batch_vectors
+
+        # Final Sort to get the true top_k
         final_pairs.sort(key=lambda x: x[1], reverse=True)
         
         final_top_k_ids = [int(p[0]) for p in final_pairs[:top_k]]
